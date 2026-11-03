@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, anyhow, bail};
+use brainroom_core::ChatRecord;
+use brainroom_store::Store;
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::QString;
 use futures_util::StreamExt;
@@ -24,6 +26,7 @@ pub mod qobject {
         #[qproperty(QString, stream_text, cxx_name = "streamText")]
         #[qproperty(QString, error_text, cxx_name = "errorText")]
         #[qproperty(bool, busy, cxx_name = "busy")]
+        #[qproperty(QString, sessions_json, cxx_name = "sessionsJson")]
         #[qproperty(QString, initial_prompt, cxx_name = "initialPrompt")]
         type AppController = super::AppControllerRust;
 
@@ -32,6 +35,12 @@ pub mod qobject {
 
         #[qinvokable]
         fn send(self: Pin<&mut Self>, prompt: &QString);
+
+        #[qinvokable]
+        fn open_chat(self: Pin<&mut Self>, id: &QString);
+
+        #[qinvokable]
+        fn new_chat(self: Pin<&mut Self>);
 
         /// QML polls this at 10 Hz; it copies the background stream state
         /// into the Qt properties. Keeping all Qt-thread work here avoids
@@ -56,8 +65,11 @@ pub struct AppControllerRust {
     stream_text: QString,
     error_text: QString,
     busy: bool,
+    sessions_json: QString,
     initial_prompt: QString,
     chat: Arc<Mutex<ChatState>>,
+    store: Store,
+    active_chat: Arc<Mutex<Option<String>>>,
 }
 
 impl Default for AppControllerRust {
@@ -76,6 +88,8 @@ impl Default for AppControllerRust {
             .iter()
             .find_map(|arg| arg.strip_prefix("--prompt="))
             .unwrap_or("");
+        let store = Store::new(Store::default_dir());
+        let sessions_json = sessions_json(&store);
         Self {
             status: QString::from("Phase 0 · Rust + Qt"),
             version: QString::from(env!("CARGO_PKG_VERSION")),
@@ -84,8 +98,11 @@ impl Default for AppControllerRust {
             stream_text: QString::default(),
             error_text: QString::default(),
             busy: false,
+            sessions_json: QString::from(sessions_json),
             initial_prompt: QString::from(initial_prompt),
             chat: Arc::new(Mutex::new(ChatState::default())),
+            store,
+            active_chat: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -122,6 +139,9 @@ fn api_key() -> Option<String> {
 }
 
 fn model_id() -> String {
+    if let Some(model) = Store::new(Store::default_dir()).strong_model() {
+        return model.id;
+    }
     let settings = home_dir().join(".config/LearnHarness/data/settings.json");
     if let Some(value) = read_json(&settings)
         && let Some(id) = value
@@ -132,6 +152,37 @@ fn model_id() -> String {
         return id.to_string();
     }
     "nvidia/nemotron-3-ultra-550b-a55b".to_string()
+}
+
+fn message_text(message: &serde_json::Value) -> String {
+    if let Some(text) = message.get("content").and_then(|value| value.as_str()) {
+        return text.to_string();
+    }
+    if let Some(parts) = message.get("content").and_then(|value| value.as_array()) {
+        return parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(|value| value.as_str()))
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+    String::new()
+}
+
+fn sessions_json(store: &Store) -> String {
+    serde_json::to_string(&store.list_chats()).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn title_from_prompt(prompt: &str) -> String {
+    let trimmed = prompt.trim();
+    if trimmed.is_empty() {
+        return "Untitled session".to_string();
+    }
+    let text: String = trimmed.chars().take(64).collect();
+    if trimmed.chars().count() > 64 {
+        format!("{text}…")
+    } else {
+        text
+    }
 }
 
 fn runtime() -> &'static tokio::runtime::Runtime {
@@ -220,6 +271,22 @@ impl qobject::AppController {
 
     pub fn send(mut self: Pin<&mut Self>, prompt: &QString) {
         let prompt = prompt.to_string();
+        let store = self.as_ref().rust().store.clone();
+        let active = self.as_ref().rust().active_chat.clone();
+        let mut record: ChatRecord = {
+            let mut guard = active.lock().expect("active chat");
+            let existing = guard.clone();
+            existing
+                .and_then(|id| store.load_chat(&id))
+                .unwrap_or_else(|| {
+                    let record = store.create_chat(&title_from_prompt(&prompt));
+                    *guard = Some(record.id.clone());
+                    record
+                })
+        };
+        let chat_id = record.id.clone();
+        store.append_message(&mut record, "user", &prompt);
+
         let state = self.as_ref().rust().chat.clone();
         {
             let mut chat = state.lock().expect("chat state");
@@ -238,13 +305,70 @@ impl qobject::AppController {
                 }
             })
             .await;
-            if let Ok(mut chat) = state.lock() {
+            let final_text = {
+                let mut chat = state.lock().expect("chat state");
                 chat.busy = false;
-                if let Err(error) = result {
+                if let Err(error) = &result {
                     chat.error = error.to_string();
                 }
+                chat.text.clone()
+            };
+            if result.is_ok()
+                && !final_text.is_empty()
+                && let Some(mut record) = store.load_chat(&chat_id)
+            {
+                store.append_message(&mut record, "assistant", &final_text);
             }
         });
+    }
+
+    pub fn new_chat(mut self: Pin<&mut Self>) {
+        *self
+            .as_ref()
+            .rust()
+            .active_chat
+            .lock()
+            .expect("active chat") = None;
+        let state = self.as_ref().rust().chat.clone();
+        {
+            let mut chat = state.lock().expect("chat state");
+            chat.text.clear();
+            chat.error.clear();
+            chat.busy = false;
+        }
+        self.as_mut().set_stream_text(QString::default());
+        self.as_mut().set_error_text(QString::default());
+        self.as_mut().set_busy(false);
+    }
+
+    pub fn open_chat(mut self: Pin<&mut Self>, id: &QString) {
+        let id = id.to_string();
+        let store = self.as_ref().rust().store.clone();
+        let Some(record) = store.load_chat(&id) else {
+            return;
+        };
+        *self
+            .as_ref()
+            .rust()
+            .active_chat
+            .lock()
+            .expect("active chat") = Some(id);
+        let transcript = record
+            .messages
+            .iter()
+            .map(message_text)
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let state = self.as_ref().rust().chat.clone();
+        {
+            let mut chat = state.lock().expect("chat state");
+            chat.text = transcript;
+            chat.error.clear();
+            chat.busy = false;
+        }
+        self.as_mut().set_error_text(QString::default());
+        self.as_mut().set_busy(false);
     }
 
     pub fn poll(mut self: Pin<&mut Self>) {
@@ -256,5 +380,7 @@ impl qobject::AppController {
         self.as_mut().set_stream_text(QString::from(text));
         self.as_mut().set_error_text(QString::from(error));
         self.as_mut().set_busy(busy);
+        let sessions = sessions_json(&self.as_ref().rust().store);
+        self.as_mut().set_sessions_json(QString::from(sessions));
     }
 }

@@ -8,11 +8,34 @@ Rectangle {
     color: theme.bg
 
     property var theme
+    property var sessions: []
     property string selectedTitle: "Gradient descent"
     property int tab: 0
 
+    readonly property var sampleSessions: [
+        { title: "Gradient descent", status: "Waiting for your answer · just now" },
+        { title: "Neural networks", status: "Waiting for your answer · 1d ago" },
+        { title: "Deflationary theories of truth", status: "Waiting for your answer · 1d ago" },
+        { title: "Relational model", status: "Waiting for your answer · 2d ago" },
+        { title: "Data structures and algorithms", status: "3d ago" },
+        { title: "Thermodynamic computing", status: "3d ago" },
+        { title: "Lean", status: "Waiting for your answer · 5d ago" },
+        { title: "Hume", status: "Waiting for your answer · 6d ago" },
+        { title: "Bayesian knowledge tracing", status: "Waiting for your answer · 2026-10-08" },
+        { title: "Lacan", status: "Waiting for your answer · 2026-10-08" },
+        { title: "Objet petit a", status: "2026-10-08" },
+        { title: "Transformers", status: "2026-10-08" }
+    ]
+
+    function sessionStatus(item) {
+        if (item.status !== undefined) return item.status;
+        if (item.messageCount !== undefined) return item.messageCount + " messages";
+        if (item.updatedAt !== undefined) return item.updatedAt;
+        return "";
+    }
+
     signal newTeaching()
-    signal sessionSelected(string title)
+    signal sessionSelectedId(string id, string title)
     signal openSettings()
     signal goHome()
     signal closeWindow()
@@ -259,26 +282,13 @@ Rectangle {
             Layout.fillHeight: true
             clip: true
             spacing: 2
-            model: ListModel {
-                ListElement { title: "Gradient descent"; status: "Waiting for your answer · just now" }
-                ListElement { title: "Neural networks"; status: "Waiting for your answer · 1d ago" }
-                ListElement { title: "Deflationary theories of truth"; status: "Waiting for your answer · 1d ago" }
-                ListElement { title: "Relational model"; status: "Waiting for your answer · 2d ago" }
-                ListElement { title: "Data structures and algorithms"; status: "3d ago" }
-                ListElement { title: "Thermodynamic computing"; status: "3d ago" }
-                ListElement { title: "Lean"; status: "Waiting for your answer · 5d ago" }
-                ListElement { title: "Hume"; status: "Waiting for your answer · 6d ago" }
-                ListElement { title: "Bayesian knowledge tracing"; status: "Waiting for your answer · 2026-10-08" }
-                ListElement { title: "Lacan"; status: "Waiting for your answer · 2026-10-08" }
-                ListElement { title: "Objet petit a"; status: "2026-10-08" }
-                ListElement { title: "Transformers"; status: "2026-10-08" }
-            }
+            model: sidebar.sessions.length > 0 ? sidebar.sessions : sidebar.sampleSessions
             delegate: Rectangle {
                 width: sessions.width
                 height: 54
                 radius: 8
-                color: sidebar.selectedTitle === model.title ? "#202020" : "transparent"
-                border.color: sidebar.selectedTitle === model.title ? "#303030" : "transparent"
+                color: sidebar.selectedTitle === modelData.title ? "#202020" : "transparent"
+                border.color: sidebar.selectedTitle === modelData.title ? "#303030" : "transparent"
                 border.width: 1
 
                 Column {
@@ -290,7 +300,7 @@ Rectangle {
                     spacing: 3
                     Text {
                         width: parent.width
-                        text: model.title
+                        text: modelData.title
                         elide: Text.ElideRight
                         color: theme.fg
                         font.family: theme.proseFont
@@ -298,7 +308,7 @@ Rectangle {
                     }
                     Text {
                         width: parent.width
-                        text: model.status
+                        text: sidebar.sessionStatus(modelData)
                         elide: Text.ElideRight
                         color: theme.fgDim
                         font.family: theme.uiFont
@@ -308,9 +318,9 @@ Rectangle {
                 MouseArea {
                     anchors.fill: parent
                     hoverEnabled: true
-                    onClicked: sidebar.sessionSelected(model.title)
-                    onEntered: if (sidebar.selectedTitle !== model.title) parent.color = "#1a1a1a"
-                    onExited: parent.color = sidebar.selectedTitle === model.title ? "#202020" : "transparent"
+                    onClicked: sidebar.sessionSelectedId(modelData.id !== undefined ? modelData.id : "", modelData.title)
+                    onEntered: if (sidebar.selectedTitle !== modelData.title) parent.color = "#1a1a1a"
+                    onExited: parent.color = sidebar.selectedTitle === modelData.title ? "#202020" : "transparent"
                 }
             }
         }

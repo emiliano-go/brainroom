@@ -39,7 +39,7 @@ Legend: **UI** = Qt Quick surface, **Logic** = Rust behavior/data, **Tests** = a
 
 | Feature | LearnHarness implementation | Brainroom status | Next |
 |---|---|---|---|
-| Session list/filter | `sidebar.tsx` | UI static | model + store + search |
+| Session list/filter | `sidebar.tsx` | **partial**: real chats from the Rust store; search field not wired | search filter + rename/delete |
 | New teach / practice | `start-session.ts`, `minimal-home.tsx` | buttons only | create chat JSON |
 | Rename / delete | `session` routes | not started | store + dialogs |
 | Phase badges / status | `phases.ts` | static statuses | derive from record |
@@ -57,8 +57,8 @@ Legend: **UI** = Qt Quick surface, **Logic** = Rust behavior/data, **Tests** = a
 | Compaction | `compaction.ts`, divider | not started | port cut/summary |
 | Stats / cost / model pills | `stats-bar.tsx` | UI static | real usage |
 | Model / thinking pickers | `model-picker.tsx` | UI pills only | menus + settings |
-| Session resume | chat JSON replay | not started | native record replay |
-| Live assistant streaming | `pi-ai` SSE + UI stream | **partial**: Rust OpenRouter SSE → QML response panel | tool loop, persistence, cancel |
+| Session resume | chat JSON replay | **partial**: `openChat` loads the stored transcript into the response panel | native record replay + full transcript UI |
+| Live assistant streaming | `pi-ai` SSE + UI stream | **partial**: Rust OpenRouter SSE → QML response panel; user+assistant persisted | tool loop, cancel, markdown |
 | Session find | `session-find.tsx` | not started | find UI |
 
 ## 4. Agents and tools
@@ -132,7 +132,9 @@ Legend: **UI** = Qt Quick surface, **Logic** = Rust behavior/data, **Tests** = a
 | Graph settings | `appearance-section.tsx` | not started | render settings |
 | Keyboard shortcuts | `keyboard-section.tsx` | not started | QML shortcuts |
 | Keys | `keys-section.tsx` | not started | `auth.json` 0600 |
-| Model catalog / pricing | `model-catalog.ts`, `prices.ts` | not started | port catalog JSON |
+| Model catalog / pricing | `model-catalog.ts`, `prices.ts` | **partial**: strong model read from store/LearnHarness; no catalog/prices | port catalog JSON |
+| Chat persistence | `src/store/chats.ts` | **done**: one JSON per chat, atomic writes, id guard, version guard, list/load/append | full native message schema |
+| Settings / auth read | `settings.ts`, `auth.ts` | **partial**: `settings.json` model/teaching and `auth.json` OpenRouter key read | write API + key UI |
 | OpenRouter + 40 providers | `pi-ai` catalogs | not started | provider trait |
 | Free→paid fallback | `models.ts` | not started | payload fallback |
 | Subscriptions (ChatGPT/Copilot/Grok) | `electron/*` | not started | OAuth/device code |

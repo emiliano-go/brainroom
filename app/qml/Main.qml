@@ -34,12 +34,18 @@ ApplicationWindow {
             visible: root.view === "session"
             theme: theme
             selectedTitle: root.sessionTitle
+            sessions: {
+                try { return JSON.parse(app.sessionsJson || "[]"); }
+                catch (e) { return []; }
+            }
             onNewTeaching: {
                 root.sessionTitle = "Gradient descent";
                 root.view = "session";
             }
-            onSessionSelected: function (title) {
+            onSessionSelectedId: function (id, title) {
                 root.sessionTitle = title;
+                if (id.length > 0)
+                    app.openChat(id);
                 root.view = "session";
             }
             onOpenSettings: root.settingsOpen = true
@@ -57,6 +63,7 @@ ApplicationWindow {
             visible: root.view === "home"
             theme: theme
             onSubmitPrompt: function (text) {
+                app.newChat();
                 app.send(text);
                 root.sessionTitle = text.length > 0 ? text : "New session";
                 root.view = "session";
@@ -127,6 +134,8 @@ ApplicationWindow {
             shotTimer.start();
         if (app.initialPrompt !== "") {
             view = "session";
+            sessionTitle = app.initialPrompt;
+            app.newChat();
             app.send(app.initialPrompt);
         }
     }
