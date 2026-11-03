@@ -2,7 +2,11 @@
 
 A native **Rust + Qt 6** reimplementation of the LearnHarness learning harness: adaptive teaching, graded practice, and a persistent knowledge graph — without Electron.
 
-**Status: Phase 0 (foundation spike).** The first milestone is a working Qt Quick shell that streams an OpenRouter lesson, renders Markdown + math natively, and writes chats in the existing LearnHarness format. Full parity is planned; see [`docs/PLAN.md`](docs/PLAN.md).
+**Status: Phase 0 (UI parity + foundation).** The Qt Quick shell now mirrors the LearnHarness home/graph and teaching-session layouts, with clickable graph nodes, pan/zoom, a session sidebar, prediction card, confidence/thinking fields, and a settings shell. The Rust backend, agent loop, and persistence are next. See [`docs/FEATURES.md`](docs/FEATURES.md) for the full migration checklist and [`docs/PLAN.md`](docs/PLAN.md) for the phase plan.
+
+![Brainroom home](docs/assets/brainroom-home.png)
+
+![Brainroom session](docs/assets/brainroom-session.png)
 
 ## Based on and inspired by LearnHarness
 
@@ -44,7 +48,7 @@ Requirements: Rust 1.85+, Qt 6.8+ (`Quick`, `QuickControls2`), `cxx-qt` 0.10 bui
 cargo run -p brainroom
 ```
 
-The Phase 0 app opens a Qt Quick window; the first lesson/provider wiring lands in the next milestone.
+The current build opens the home graph and session views. Run `cargo run -p brainroom -- --home` or `--session` to choose the initial view.
 
 ## Plan
 

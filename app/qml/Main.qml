@@ -6,40 +6,113 @@ import Brainroom 1.0
 ApplicationWindow {
     id: root
     visible: true
-    width: 1200
-    height: 800
-    minimumWidth: 640
-    minimumHeight: 480
+    width: 1440
+    height: 900
+    minimumWidth: 1000
+    minimumHeight: 700
     title: "Brainroom"
-    color: "#141414"
+    color: theme.bg
+    flags: Qt.FramelessWindowHint
 
-    AppController {
-        id: app
+    property string view: "session"
+    property string sessionTitle: "Gradient descent"
+    property bool settingsOpen: false
+    property string screenshotPath: ""
+
+    AppController { id: app }
+
+    Theme { id: theme }
+
+    Rectangle {
+        anchors.fill: parent
+        color: theme.bg
+
+        Sidebar {
+            id: sidebar
+            width: 280
+            height: parent.height
+            visible: root.view === "session"
+            theme: theme
+            selectedTitle: root.sessionTitle
+            onNewTeaching: {
+                root.sessionTitle = "Gradient descent";
+                root.view = "session";
+            }
+            onSessionSelected: function (title) {
+                root.sessionTitle = title;
+                root.view = "session";
+            }
+            onOpenSettings: root.settingsOpen = true
+            onGoHome: root.view = "home"
+            onCloseWindow: root.close()
+            onMinimizeWindow: root.showMinimized()
+            onMaximizeWindow: root.visibility === Window.Maximized ? root.showNormal() : root.showMaximized()
+        }
+
+        HomeView {
+            anchors.left: root.view === "session" ? sidebar.right : parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            visible: root.view === "home"
+            theme: theme
+            onOpenSession: function (title) {
+                root.sessionTitle = title;
+                root.view = "session";
+            }
+            onOpenSettings: root.settingsOpen = true
+            onToggleSidebar: root.view = "session"
+            onCloseWindow: root.close()
+            onMinimizeWindow: root.showMinimized()
+            onMaximizeWindow: root.visibility === Window.Maximized ? root.showNormal() : root.showMaximized()
+        }
+
+        SessionView {
+            anchors.left: sidebar.right
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            visible: root.view === "session"
+            theme: theme
+            lessonTitle: root.sessionTitle
+            onOpenSettings: root.settingsOpen = true
+            onToggleSidebar: root.view = "home"
+        }
+
+        SettingsDialog {
+            anchors.fill: parent
+            visible: root.settingsOpen
+            theme: theme
+            onClosed: root.settingsOpen = false
+        }
     }
 
-    Component.onCompleted: app.boot()
+    Timer {
+        id: fallbackTimer
+        interval: 5000
+        repeat: false
+        running: screenshotPath !== ""
+        onTriggered: Qt.quit()
+    }
 
-    Column {
-        anchors.centerIn: parent
-        spacing: 12
-
-        Text {
-            text: "Brainroom"
-            color: "#e6e6e6"
-            font.pixelSize: 36
-            font.bold: true
+    Timer {
+        id: shotTimer
+        interval: 1100
+        repeat: false
+        running: false
+        onTriggered: {
+            root.contentItem.grabToImage(function (result) {
+                if (root.screenshotPath !== "")
+                    result.saveToFile(root.screenshotPath);
+                Qt.quit();
+            }, Qt.size(root.width, root.height));
         }
+    }
 
-        Text {
-            text: app.status
-            color: "#8d8d8d"
-            font.pixelSize: 16
-        }
-
-        Text {
-            text: "v" + app.version + " · based on LearnHarness (AGPL-3.0)"
-            color: "#5a5a6a"
-            font.pixelSize: 12
-        }
+    Component.onCompleted: {
+        view = app.initialView;
+        screenshotPath = app.screenshotPath;
+        if (screenshotPath !== "")
+            shotTimer.start();
     }
 }

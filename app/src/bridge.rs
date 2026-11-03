@@ -14,6 +14,8 @@ pub mod qobject {
         #[qml_element]
         #[qproperty(QString, status, cxx_name = "status")]
         #[qproperty(QString, version, cxx_name = "version")]
+        #[qproperty(QString, initial_view, cxx_name = "initialView")]
+        #[qproperty(QString, screenshot_path, cxx_name = "screenshotPath")]
         type AppController = super::AppControllerRust;
 
         #[qinvokable]
@@ -24,13 +26,27 @@ pub mod qobject {
 pub struct AppControllerRust {
     status: QString,
     version: QString,
+    initial_view: QString,
+    screenshot_path: QString,
 }
 
 impl Default for AppControllerRust {
     fn default() -> Self {
+        let args: Vec<String> = std::env::args().collect();
+        let initial_view = if args.iter().any(|arg| arg == "--home") {
+            "home"
+        } else {
+            "session"
+        };
+        let screenshot_path = args
+            .iter()
+            .find_map(|arg| arg.strip_prefix("--screenshot="))
+            .unwrap_or("");
         Self {
             status: QString::from("Phase 0 · Rust + Qt"),
             version: QString::from(env!("CARGO_PKG_VERSION")),
+            initial_view: QString::from(initial_view),
+            screenshot_path: QString::from(screenshot_path),
         }
     }
 }
