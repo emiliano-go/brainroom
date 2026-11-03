@@ -58,6 +58,7 @@ Legend: **UI** = Qt Quick surface, **Logic** = Rust behavior/data, **Tests** = a
 | Stats / cost / model pills | `stats-bar.tsx` | UI static | real usage |
 | Model / thinking pickers | `model-picker.tsx` | UI pills only | menus + settings |
 | Session resume | chat JSON replay | not started | native record replay |
+| Live assistant streaming | `pi-ai` SSE + UI stream | **partial**: Rust OpenRouter SSE → QML response panel | tool loop, persistence, cancel |
 | Session find | `session-find.tsx` | not started | find UI |
 
 ## 4. Agents and tools
@@ -76,7 +77,8 @@ Legend: **UI** = Qt Quick surface, **Logic** = Rust behavior/data, **Tests** = a
 | `read` / `ls` / `find` / `grep` | `tools/*` | not started | Rust fs tools |
 | Graph tools (`list_sessions`, `list_propositions`) | `tools/graph.ts` | not started | gate + store |
 | Tool argument healing | `argument-heal.ts` | not started | port heal + tests |
-| Tool loop / streaming | `pi-agent-core`, `pi-ai` | not started | Rust loop + SSE |
+| Tool loop / streaming | `pi-agent-core`, `pi-ai` | **partial**: direct OpenRouter SSE, no tool loop | Rust agent loop + tool calls |
+| OpenRouter transport | `pi-ai` OpenRouter | **done**: `crates`-in-app `reqwest` SSE client, key/settings discovery | provider trait, fallback, pricing |
 
 ## 5. Jobs and subagents
 

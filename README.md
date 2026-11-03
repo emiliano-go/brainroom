@@ -2,7 +2,7 @@
 
 A native **Rust + Qt 6** reimplementation of the LearnHarness learning harness: adaptive teaching, graded practice, and a persistent knowledge graph — without Electron.
 
-**Status: Phase 0 (UI parity + foundation).** The Qt Quick shell now mirrors the LearnHarness home/graph and teaching-session layouts, with clickable graph nodes, pan/zoom, a session sidebar, prediction card, confidence/thinking fields, and a settings shell. The Rust backend, agent loop, and persistence are next. See [`docs/FEATURES.md`](docs/FEATURES.md) for the full migration checklist and [`docs/PLAN.md`](docs/PLAN.md) for the phase plan.
+**Status: Phase 0 (UI parity + foundation).** The Qt Quick shell now mirrors the LearnHarness home/graph and teaching-session layouts, with clickable graph nodes, pan/zoom, a session sidebar, prediction card, confidence/thinking fields, and a settings shell. Live OpenRouter streaming is wired through the Rust bridge into the session view; the full agent loop, tool calls, and persistence are next. See [`docs/FEATURES.md`](docs/FEATURES.md) for the full migration checklist and [`docs/PLAN.md`](docs/PLAN.md) for the phase plan.
 
 ![Brainroom home](docs/assets/brainroom-home.png)
 

@@ -6,7 +6,7 @@ Item {
     id: home
 
     property var theme
-    signal openSession(string title)
+    signal submitPrompt(string text)
     signal openSettings()
     signal toggleSidebar()
     signal closeWindow()
@@ -229,7 +229,7 @@ Item {
                     color: home.theme.fgFaint
                     font: parent.font
                 }
-                onAccepted: home.openSession("Gradient descent")
+                onAccepted: home.submitPrompt(promptInput.text.length > 0 ? promptInput.text : "Gradient descent")
             }
 
             Rectangle {
@@ -249,7 +249,7 @@ Item {
                 }
                 MouseArea {
                     anchors.fill: parent
-                    onClicked: home.openSession("Gradient descent")
+                    onClicked: home.submitPrompt(promptInput.text.length > 0 ? promptInput.text : "Gradient descent")
                 }
             }
         }

@@ -56,8 +56,9 @@ ApplicationWindow {
             anchors.bottom: parent.bottom
             visible: root.view === "home"
             theme: theme
-            onOpenSession: function (title) {
-                root.sessionTitle = title;
+            onSubmitPrompt: function (text) {
+                app.send(text);
+                root.sessionTitle = text.length > 0 ? text : "New session";
                 root.view = "session";
             }
             onOpenSettings: root.settingsOpen = true
@@ -75,6 +76,9 @@ ApplicationWindow {
             visible: root.view === "session"
             theme: theme
             lessonTitle: root.sessionTitle
+            streamText: app.streamText
+            errorText: app.errorText
+            busy: app.busy
             onOpenSettings: root.settingsOpen = true
             onToggleSidebar: root.view = "home"
         }
@@ -96,6 +100,13 @@ ApplicationWindow {
     }
 
     Timer {
+        interval: 100
+        repeat: true
+        running: true
+        onTriggered: app.poll()
+    }
+
+    Timer {
         id: shotTimer
         interval: 1100
         repeat: false
@@ -114,5 +125,9 @@ ApplicationWindow {
         screenshotPath = app.screenshotPath;
         if (screenshotPath !== "")
             shotTimer.start();
+        if (app.initialPrompt !== "") {
+            view = "session";
+            app.send(app.initialPrompt);
+        }
     }
 }
