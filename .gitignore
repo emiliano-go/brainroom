@@ -1,0 +1,11 @@
+/target
+**/target
+dist
+*.AppImage
+*.deb
+auth.json
+.env
+.env.local
+data
+*.log
+**/.qmlls.ini

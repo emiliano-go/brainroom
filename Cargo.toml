@@ -1,0 +1,14 @@
+[workspace]
+resolver = "3"
+members = ["app"]
+
+[workspace.package]
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+
+[profile.release]
+lto = "thin"
+strip = true
+codegen-units = 1
+opt-level = 3
