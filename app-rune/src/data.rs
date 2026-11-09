@@ -881,6 +881,19 @@ pub fn session_phase(id: &str) -> &'static str {
     }
 }
 
+pub fn chat_model(id: &str) -> Option<String> {
+    let record = store().load_chat(id)?;
+    record
+        .settings
+        .and_then(|settings| settings.model)
+        .map(|model| model.id)
+}
+
+pub fn chat_thinking_level(id: &str) -> Option<String> {
+    let record = store().load_chat(id)?;
+    record.settings.and_then(|settings| settings.thinking_level)
+}
+
 pub fn latest_usage(store: &Store, id: &str) -> (u64, f64) {
     let Some(record) = store.load_chat(id) else {
         return (0, 0.0);

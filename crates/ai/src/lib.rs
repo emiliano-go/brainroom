@@ -62,6 +62,49 @@ pub fn model_id(data_dir: &Path) -> String {
     "nvidia/nemotron-3-ultra-550b-a55b".to_owned()
 }
 
+/// Best-effort context window for a model id. The catalog surface is static
+/// until a provider catalog is wired; unknown models fall back to 202.8k.
+pub fn context_window(model: &str) -> u64 {
+    let model = model.to_lowercase();
+    if model.contains("nemotron-3-ultra") {
+        202_800
+    } else if model.contains("claude") {
+        200_000
+    } else if model.contains("gpt-4.1") {
+        1_047_576
+    } else if model.contains("gpt-4o") || model.contains("o1") || model.contains("o3") {
+        128_000
+    } else if model.contains("gemini") {
+        1_048_576
+    } else if model.contains("llama") {
+        131_072
+    } else {
+        202_800
+    }
+}
+
+/// Fallback cost estimate when the provider omits `usage.cost`. Rates are
+/// USD per million tokens.
+pub fn estimated_cost(model: &str, prompt_tokens: u64, completion_tokens: u64) -> Option<f64> {
+    let model = model.to_lowercase();
+    let (input, output) = if model.contains("nemotron") {
+        (0.6, 1.8)
+    } else if model.contains("claude") {
+        (3.0, 15.0)
+    } else if model.contains("gpt-4.1") {
+        (2.0, 8.0)
+    } else if model.contains("gpt-4o") || model.contains("o1") || model.contains("o3") {
+        (2.5, 10.0)
+    } else if model.contains("gemini") {
+        (1.25, 5.0)
+    } else if model.contains("llama") {
+        (0.2, 0.6)
+    } else {
+        return None;
+    };
+    Some((prompt_tokens as f64 * input + completion_tokens as f64 * output) / 1_000_000.0)
+}
+
 pub fn runtime() -> &'static tokio::runtime::Runtime {
     static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     RT.get_or_init(|| {
@@ -139,4 +182,19 @@ where
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_windows_and_cost_fallbacks() {
+        assert_eq!(context_window("nvidia/nemotron-3-ultra-550b-a55b"), 202_800);
+        assert_eq!(context_window("anthropic/claude-haiku-5.5"), 200_000);
+        assert_eq!(context_window("openai/gpt-4.1"), 1_047_576);
+        let cost = estimated_cost("anthropic/claude-haiku-5.5", 1_000_000, 0).unwrap();
+        assert!((cost - 3.0).abs() < 1e-9);
+        assert!(estimated_cost("unknown/model", 1, 1).is_none());
+    }
 }

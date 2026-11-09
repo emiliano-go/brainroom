@@ -57,5 +57,5 @@ Upstream math hook request: https://github.com/anomalyco/rune/issues/332
 
 ## Known gaps
 
-- Context denominator is a fixed `202.8k` until the model catalog reports context windows.
+- Context denominator comes from the local model catalog (`context_window`), falling back to 202.8k for unknown models.
 - Graph renderer settings are per-session state, not persisted to `settings.json`.

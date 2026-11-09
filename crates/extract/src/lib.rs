@@ -751,6 +751,7 @@ impl Extractor for OpenRouterExtractor {
         let completer = brainroom_agent::OpenRouter {
             model: self.model.clone(),
             timeout: self.timeout,
+            thinking_level: None,
         };
         let tools = extractor_tools();
         let messages = vec![json!({ "role": "user", "content": extractor_prompt(prompt) })];
@@ -767,6 +768,7 @@ impl Extractor for OpenRouterExtractor {
         let completer = brainroom_agent::OpenRouter {
             model: self.model.clone(),
             timeout: self.timeout,
+            thinking_level: None,
         };
         let tools = extractor_tools();
         let messages = vec![json!({
@@ -799,6 +801,7 @@ impl Auditor for OpenRouterAuditor {
         let completer = brainroom_agent::OpenRouter {
             model: self.model.clone(),
             timeout: self.timeout,
+            thinking_level: None,
         };
         let tools = [brainroom_agent::ToolSpec {
             name: "submit_links",

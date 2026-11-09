@@ -24,6 +24,9 @@ pub struct Usage {
     pub completion_tokens: u64,
     pub total_tokens: u64,
     pub cost: Option<f64>,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub reasoning_tokens: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -428,9 +431,9 @@ pub fn assistant_record(turn: &AssistantTurn) -> Value {
             json!({
                 "input": usage.prompt_tokens,
                 "output": usage.completion_tokens,
-                "cacheRead": 0,
-                "cacheWrite": 0,
-                "reasoning": 0,
+                "cacheRead": usage.cache_read_tokens,
+                "cacheWrite": usage.cache_write_tokens,
+                "reasoning": usage.reasoning_tokens,
                 "totalTokens": usage.total_tokens,
                 "cost": { "total": usage.cost.unwrap_or(0.0) },
             }),
@@ -1247,10 +1250,261 @@ pub fn run_with_mode(
     }
 }
 
-/// OpenRouter chat completion with tool calling (non-streaming).
+/// OpenRouter chat completion with tool calling (streaming + retries).
 pub struct OpenRouter {
     pub model: String,
     pub timeout: Duration,
+    pub thinking_level: Option<String>,
+}
+
+fn usage_from_value(value: &Value) -> Option<Usage> {
+    let usage = value;
+    let prompt = usage
+        .get("prompt_tokens")
+        .or_else(|| usage.get("input_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let completion = usage
+        .get("completion_tokens")
+        .or_else(|| usage.get("output_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let cache_read = usage
+        .pointer("/prompt_tokens_details/cached_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let reasoning = usage
+        .pointer("/completion_tokens_details/reasoning_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let total = usage
+        .get("total_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(prompt + completion);
+    (total > 0 || prompt > 0 || completion > 0).then_some(Usage {
+        prompt_tokens: prompt,
+        completion_tokens: completion,
+        total_tokens: total,
+        cost: usage.get("cost").and_then(Value::as_f64),
+        cache_read_tokens: cache_read,
+        cache_write_tokens: 0,
+        reasoning_tokens: reasoning,
+    })
+}
+
+fn finalize_usage(usage: Option<Usage>, model: &str) -> Option<Usage> {
+    usage.map(|mut usage| {
+        if usage.cost.is_none() {
+            usage.cost =
+                brainroom_ai::estimated_cost(model, usage.prompt_tokens, usage.completion_tokens);
+        }
+        usage
+    })
+}
+
+fn finish_reason(value: Option<&str>) -> Option<&'static str> {
+    value.map(|reason| match reason {
+        "tool_calls" => "toolUse",
+        "length" => "length",
+        "content_filter" => "error",
+        _ => "stop",
+    })
+}
+
+fn parse_tool_calls(calls: &[(String, String, String)]) -> Vec<ToolCall> {
+    calls
+        .iter()
+        .map(|(id, name, raw)| {
+            let arguments =
+                serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.clone()));
+            ToolCall {
+                id: id.clone(),
+                name: name.clone(),
+                arguments,
+            }
+        })
+        .collect()
+}
+
+fn parse_completion_json(
+    text: &str,
+    started: std::time::Instant,
+    requested_model: &str,
+) -> anyhow::Result<AssistantTurn> {
+    let value: Value = serde_json::from_str(text).context("parse OpenRouter response")?;
+    let message = value
+        .pointer("/choices/0/message")
+        .ok_or_else(|| anyhow!("OpenRouter response has no message: {text}"))?;
+    let reply = message
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let mut calls = Vec::new();
+    if let Some(list) = message.get("tool_calls").and_then(Value::as_array) {
+        for call in list {
+            calls.push((
+                call.get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                call.pointer("/function/name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                call.pointer("/function/arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or("{}")
+                    .to_owned(),
+            ));
+        }
+    }
+    let thinking = message
+        .get("reasoning")
+        .and_then(Value::as_str)
+        .or_else(|| message.get("reasoning_content").and_then(Value::as_str))
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| ThinkingBlock {
+            text: text.to_owned(),
+            signature: message
+                .get("reasoning_details")
+                .filter(|details| !details.is_null())
+                .map(Value::to_string),
+        })
+        .into_iter()
+        .collect();
+    let raw_finish = value
+        .pointer("/choices/0/finish_reason")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    Ok(AssistantTurn {
+        text: reply,
+        thinking,
+        tool_calls: parse_tool_calls(&calls),
+        usage: finalize_usage(
+            value.get("usage").and_then(usage_from_value),
+            value
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or(requested_model),
+        ),
+        api: Some("openai-completions".to_owned()),
+        provider: Some("openrouter".to_owned()),
+        model: value
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| Some(requested_model.to_owned())),
+        stop_reason: finish_reason(raw_finish.as_deref()).map(str::to_owned),
+        raw_stop_reason: raw_finish,
+        response_id: value.get("id").and_then(Value::as_str).map(str::to_owned),
+        duration_ms: started.elapsed().as_millis() as u64,
+        thinking_level: None,
+    })
+}
+
+fn parse_completion_stream(
+    response: reqwest::blocking::Response,
+    started: std::time::Instant,
+    requested_model: &str,
+) -> anyhow::Result<AssistantTurn> {
+    use std::io::BufRead;
+    let mut reader = std::io::BufReader::new(response);
+    let mut line = String::new();
+    let mut text = String::new();
+    let mut reasoning = String::new();
+    let mut calls: std::collections::BTreeMap<usize, (String, String, String)> =
+        std::collections::BTreeMap::new();
+    let mut usage = None;
+    let mut response_id = None;
+    let mut model = None;
+    let mut raw_finish = None;
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        let Some(data) = line.trim().strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data == "[DONE]" {
+            break;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(data) else {
+            continue;
+        };
+        if let Some(id) = value.get("id").and_then(Value::as_str) {
+            response_id = Some(id.to_owned());
+        }
+        if let Some(name) = value.get("model").and_then(Value::as_str) {
+            model = Some(name.to_owned());
+        }
+        if let Some(u) = value.get("usage") {
+            usage = usage_from_value(u);
+        }
+        if let Some(choice) = value.pointer("/choices/0") {
+            if let Some(content) = choice.pointer("/delta/content").and_then(Value::as_str) {
+                text.push_str(content);
+            }
+            let delta_reasoning = choice
+                .pointer("/delta/reasoning")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    choice
+                        .pointer("/delta/reasoning_content")
+                        .and_then(Value::as_str)
+                });
+            if let Some(chunk) = delta_reasoning {
+                reasoning.push_str(chunk);
+            }
+            if let Some(finish) = choice.get("finish_reason").and_then(Value::as_str) {
+                raw_finish = Some(finish.to_owned());
+            }
+            if let Some(list) = choice
+                .pointer("/delta/tool_calls")
+                .and_then(Value::as_array)
+            {
+                for call in list {
+                    let index = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                    let entry = calls.entry(index).or_default();
+                    if let Some(id) = call.get("id").and_then(Value::as_str) {
+                        entry.0 = id.to_owned();
+                    }
+                    if let Some(name) = call.pointer("/function/name").and_then(Value::as_str) {
+                        entry.1.push_str(name);
+                    }
+                    if let Some(args) = call.pointer("/function/arguments").and_then(Value::as_str)
+                    {
+                        entry.2.push_str(args);
+                    }
+                }
+            }
+        }
+    }
+    let ordered: Vec<(String, String, String)> = calls.into_values().collect();
+    let thinking = (!reasoning.trim().is_empty())
+        .then_some(ThinkingBlock {
+            text: reasoning,
+            signature: None,
+        })
+        .into_iter()
+        .collect();
+    let model = model.or_else(|| Some(requested_model.to_owned()));
+    Ok(AssistantTurn {
+        text,
+        thinking,
+        tool_calls: parse_tool_calls(&ordered),
+        usage: finalize_usage(usage, model.as_deref().unwrap_or(requested_model)),
+        api: Some("openai-completions".to_owned()),
+        provider: Some("openrouter".to_owned()),
+        model,
+        stop_reason: finish_reason(raw_finish.as_deref()).map(str::to_owned),
+        raw_stop_reason: raw_finish,
+        response_id,
+        duration_ms: started.elapsed().as_millis() as u64,
+        thinking_level: None,
+    })
 }
 
 impl Completer for OpenRouter {
@@ -1271,128 +1525,66 @@ impl Completer for OpenRouter {
                 })
             })
             .collect();
-        let body = json!({
+        let mut body = json!({
             "model": self.model,
             "messages": messages,
             "tools": tools_json,
             "tool_choice": "auto",
-            "stream": false,
+            "stream": true,
+            "stream_options": { "include_usage": true },
             "max_tokens": 2048,
         });
+        if let Some(level) = &self.thinking_level
+            && level != "off"
+        {
+            body["reasoning"] = json!({ "effort": level });
+        }
         let client = reqwest::blocking::Client::builder()
             .timeout(self.timeout)
             .build()
             .context("build HTTP client")?;
-        let response = client
-            .post("https://openrouter.ai/api/v1/chat/completions")
-            .header("Authorization", format!("Bearer {key}"))
-            .header("Content-Type", "application/json")
-            .header("HTTP-Referer", "https://github.com/emiliano-go/brainroom")
-            .header("X-Title", "Brainroom")
-            .json(&body)
-            .send()
-            .context("OpenRouter request failed")?;
-        let status = response.status();
-        let text = response.text().context("read OpenRouter response")?;
-        if !status.is_success() {
-            return Err(anyhow!("OpenRouter {status}: {text}"));
-        }
-        let value: Value = serde_json::from_str(&text).context("parse OpenRouter response")?;
-        let message = value
-            .pointer("/choices/0/message")
-            .ok_or_else(|| anyhow!("OpenRouter response has no message: {text}"))?;
-        let reply = message
-            .get("content")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        let mut tool_calls = Vec::new();
-        if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
-            for call in calls {
-                let id = call
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned();
-                let name = call
-                    .pointer("/function/name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned();
-                let raw = call
-                    .pointer("/function/arguments")
-                    .and_then(Value::as_str)
-                    .unwrap_or("{}");
-                let arguments =
-                    serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_owned()));
-                tool_calls.push(ToolCall {
-                    id,
-                    name,
-                    arguments,
-                });
+        let mut last_error = None;
+        for attempt in 0..3 {
+            let response = client
+                .post("https://openrouter.ai/api/v1/chat/completions")
+                .header("Authorization", format!("Bearer {key}"))
+                .header("Content-Type", "application/json")
+                .header("HTTP-Referer", "https://github.com/emiliano-go/brainroom")
+                .header("X-Title", "Brainroom")
+                .json(&body)
+                .send();
+            match response {
+                Ok(response) if response.status().is_success() => {
+                    let stream = response
+                        .headers()
+                        .get(reqwest::header::CONTENT_TYPE)
+                        .and_then(|value| value.to_str().ok())
+                        .is_some_and(|value| value.contains("text/event-stream"));
+                    if !stream {
+                        let text = response.text().context("read OpenRouter response")?;
+                        return parse_completion_json(&text, started, &self.model);
+                    }
+                    return parse_completion_stream(response, started, &self.model);
+                }
+                Ok(response) => {
+                    let status = response.status();
+                    let text = response.text().unwrap_or_default();
+                    let retryable = status.as_u16() == 429 || status.is_server_error();
+                    last_error = Some(anyhow!("OpenRouter {status}: {text}"));
+                    if !retryable || attempt == 2 {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    last_error = Some(anyhow!(error).context("OpenRouter request failed"));
+                    if attempt == 2 {
+                        break;
+                    }
+                }
             }
+            std::thread::sleep(Duration::from_millis(500 * (1 << attempt)));
         }
-        let usage = value.get("usage").and_then(|u| {
-            let prompt = u.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
-            let completion = u
-                .get("completion_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let total = u
-                .get("total_tokens")
-                .and_then(Value::as_u64)
-                .unwrap_or(prompt + completion);
-            (total > 0 || prompt > 0 || completion > 0).then_some(Usage {
-                prompt_tokens: prompt,
-                completion_tokens: completion,
-                total_tokens: total,
-                cost: u.get("cost").and_then(Value::as_f64),
-            })
-        });
-        let model = value
-            .get("model")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| Some(self.model.clone()));
-        let response_id = value.get("id").and_then(Value::as_str).map(str::to_owned);
-        let finish = value
-            .pointer("/choices/0/finish_reason")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        let stop_reason = finish.as_deref().map(|reason| match reason {
-            "tool_calls" => "toolUse",
-            "length" => "length",
-            "content_filter" => "error",
-            _ => "stop",
-        });
-        let thinking = message
-            .get("reasoning")
-            .and_then(Value::as_str)
-            .or_else(|| message.get("reasoning_content").and_then(Value::as_str))
-            .filter(|text| !text.trim().is_empty())
-            .map(|text| ThinkingBlock {
-                text: text.to_owned(),
-                signature: message
-                    .get("reasoning_details")
-                    .filter(|details| !details.is_null())
-                    .map(Value::to_string),
-            })
-            .into_iter()
-            .collect();
-        Ok(AssistantTurn {
-            text: reply,
-            thinking,
-            tool_calls,
-            usage,
-            api: Some("openai-completions".to_owned()),
-            provider: Some("openrouter".to_owned()),
-            model,
-            stop_reason: stop_reason.map(str::to_owned),
-            raw_stop_reason: finish,
-            response_id,
-            duration_ms: started.elapsed().as_millis() as u64,
-            thinking_level: None,
-        })
+        Err(last_error.unwrap_or_else(|| anyhow!("OpenRouter request failed")))
     }
 }
 
@@ -1446,6 +1638,37 @@ mod tests {
     }
 
     #[test]
+    fn nonstreaming_fallback_parses_tools_and_usage() {
+        let body = r#"{
+            "id":"gen-1","model":"m",
+            "choices":[{"message":{"content":"hi","reasoning":"why","tool_calls":[{"id":"c1","function":{"name":"quiz","arguments":"{\"question\":\"Q\"}"}}]},"finish_reason":"tool_calls"}],
+            "usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15,"cost":0.02}
+        }"#;
+        let turn = parse_completion_json(body, std::time::Instant::now(), "m").unwrap();
+        assert_eq!(turn.text, "hi");
+        assert_eq!(turn.thinking[0].text, "why");
+        assert_eq!(turn.tool_calls[0].id, "c1");
+        assert_eq!(turn.usage.unwrap().total_tokens, 15);
+        assert_eq!(turn.stop_reason.as_deref(), Some("toolUse"));
+    }
+
+    #[test]
+    fn usage_captures_cache_and_reasoning() {
+        let usage = usage_from_value(&json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "cost": 0.01,
+            "prompt_tokens_details": { "cached_tokens": 40 },
+            "completion_tokens_details": { "reasoning_tokens": 5 }
+        }))
+        .unwrap();
+        assert_eq!(usage.cache_read_tokens, 40);
+        assert_eq!(usage.reasoning_tokens, 5);
+        assert_eq!(usage.cost, Some(0.01));
+    }
+
+    #[test]
     fn assistant_record_matches_learnharness_shape() {
         let turn = AssistantTurn {
             text: "Here.".to_owned(),
@@ -1463,6 +1686,9 @@ mod tests {
                 completion_tokens: 5,
                 total_tokens: 15,
                 cost: Some(0.25),
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
             }),
             api: Some("openai-completions".to_owned()),
             provider: Some("openrouter".to_owned()),
@@ -1859,6 +2085,7 @@ mod tests {
         let agent = OpenRouter {
             model,
             timeout: Duration::from_secs(120),
+            thinking_level: None,
         };
         let data = brainroom_ai::home_dir().join(".config/LearnHarness/data");
         let (in_tx, in_rx) = mpsc::channel();
@@ -1908,6 +2135,7 @@ mod tests {
         let agent = OpenRouter {
             model,
             timeout: Duration::from_secs(120),
+            thinking_level: None,
         };
         let data = brainroom_ai::home_dir().join(".config/LearnHarness/data");
         let (in_tx, in_rx) = mpsc::channel();
@@ -1955,6 +2183,7 @@ mod tests {
         let agent = OpenRouter {
             model,
             timeout: Duration::from_secs(90),
+            thinking_level: None,
         };
         let turn = agent
             .complete(

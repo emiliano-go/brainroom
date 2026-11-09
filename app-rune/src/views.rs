@@ -169,6 +169,9 @@ impl State {
         self.stop_stream();
         let store = data::store();
         self.chat = data::load_chat(&store, id);
+        if let Some(model) = data::chat_model(id) {
+            self.model = model;
+        }
         self.active_id = Some(id.to_owned());
         self.thinking = TextEdit::new("");
         self.reading = TextEdit::new("");
@@ -388,8 +391,9 @@ impl State {
         let prompt = brainroom_core::compaction::build_prompt(&span, plan.as_deref(), kind);
         let model = brainroom_ai::model_id(&data::data_dir());
         let completer = brainroom_agent::OpenRouter {
-            model: model.clone(),
+            model: data::chat_model(chat_id).unwrap_or_else(|| model.clone()),
             timeout: std::time::Duration::from_secs(120),
+            thinking_level: data::chat_thinking_level(chat_id),
         };
         let Ok(turn) = completer.complete(
             &[serde_json::json!({ "role": "user", "content": prompt })],
@@ -478,7 +482,12 @@ impl State {
         } else {
             brainroom_agent::Mode::Teach
         };
-        let agent = ai::start(history, mode);
+        let agent = ai::start(
+            history,
+            mode,
+            data::chat_model(&id),
+            data::chat_thinking_level(&id),
+        );
         let _ = agent.inbox.send(brainroom_agent::Input::User(text));
         self.agent = Some(agent);
     }
@@ -3397,10 +3406,15 @@ fn stats_bar(s: &State, th: &Theme) -> El {
             .gap(10.0)
             .items_center()
             .child(
-                text(format!("{} / 202.8k · {}", format_tokens(s.tokens), s.cost))
-                    .font(mono(11.0, 400.0))
-                    .color(th.muted)
-                    .grow(1.0),
+                text(format!(
+                    "{} / {:.1}k · {}",
+                    format_tokens(s.tokens),
+                    brainroom_ai::context_window(&s.model) as f64 / 1000.0,
+                    s.cost
+                ))
+                .font(mono(11.0, 400.0))
+                .color(th.muted)
+                .grow(1.0),
             )
             .child(if s.busy {
                 row()
@@ -4158,6 +4172,9 @@ mod tests {
                 completion_tokens: 5,
                 total_tokens: 15,
                 cost: Some(0.25),
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
             }))
             .unwrap();
         assert!(state.poll());
