@@ -127,11 +127,177 @@ pub fn tools() -> Vec<ToolSpec> {
 }
 
 pub fn tools_for(mode: Mode) -> Vec<ToolSpec> {
-    match mode {
+    let mut tools = match mode {
         Mode::Prober => prober_tools(),
         Mode::Teach => teach_tools(),
         Mode::Practice => practice_tools(),
-    }
+    };
+    tools.extend(extra_tools());
+    tools
+}
+
+fn extra_tools() -> Vec<ToolSpec> {
+    vec![
+        ToolSpec {
+            name: "read",
+            description: "Read a UTF-8 text file (or list a directory). Paths resolve against the learner's home; offset is 1-based. Output is capped at 2000 lines / 50KB.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "offset": { "type": "integer", "minimum": 1 },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 2000 }
+                },
+                "required": ["path"]
+            }),
+        },
+        ToolSpec {
+            name: "ls",
+            description: "List a directory with '/' for directories, including dotfiles. Paths resolve against the learner's home.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 500 }
+                }
+            }),
+        },
+        ToolSpec {
+            name: "find",
+            description: "Find files by glob ('*.rs', '**/*.json'). Skips node_modules, .git and Library.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string" },
+                    "path": { "type": "string" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 1000 }
+                },
+                "required": ["pattern"]
+            }),
+        },
+        ToolSpec {
+            name: "grep",
+            description: "Search file contents by literal substring (optionally case-insensitive), returning path:line: text.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": { "type": "string" },
+                    "path": { "type": "string" },
+                    "glob": { "type": "string" },
+                    "ignoreCase": { "type": "boolean" },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 500 }
+                },
+                "required": ["pattern"]
+            }),
+        },
+        ToolSpec {
+            name: "web_search",
+            description: "Search the web through Tavily. Requires TAVILY_API_KEY; missing key is an honest tool error.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "count": { "type": "integer", "minimum": 1, "maximum": 10 }
+                },
+                "required": ["query"]
+            }),
+        },
+        ToolSpec {
+            name: "web_fetch",
+            description: "Fetch a URL and return readable text (truncated). PDFs point to web_fetch_pdf.",
+            parameters: json!({
+                "type": "object",
+                "properties": { "url": { "type": "string" } },
+                "required": ["url"]
+            }),
+        },
+        ToolSpec {
+            name: "web_fetch_pdf",
+            description: "Download a PDF and extract its text with pdftotext.",
+            parameters: json!({
+                "type": "object",
+                "properties": { "url": { "type": "string" } },
+                "required": ["url"]
+            }),
+        },
+        ToolSpec {
+            name: "research",
+            description: "Research one question using web search and return a sourced brief.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "question": { "type": "string" },
+                    "context": { "type": "string" }
+                },
+                "required": ["question"]
+            }),
+        },
+        ToolSpec {
+            name: "demo",
+            description: "Create a self-contained HTML teaching demo artifact.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string" },
+                    "brief": { "type": "string" }
+                },
+                "required": ["title", "brief"]
+            }),
+        },
+        ToolSpec {
+            name: "visual",
+            description: "Create a static SVG figure artifact from a precise brief.",
+            parameters: json!({
+                "type": "object",
+                "properties": { "brief": { "type": "string" } },
+                "required": ["brief"]
+            }),
+        },
+        ToolSpec {
+            name: "submit_extraction",
+            description: "Submit durable propositions and entailment chains extracted from the session into the knowledge graph.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "nodes": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string" },
+                                "statement": { "type": "string" }
+                            },
+                            "required": ["name", "statement"]
+                        }
+                    },
+                    "chains": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "premises": { "type": "array", "items": { "type": "string" } },
+                                "conclusion": { "type": "string" }
+                            },
+                            "required": ["premises", "conclusion"]
+                        }
+                    }
+                },
+                "required": ["nodes"]
+            }),
+        },
+        ToolSpec {
+            name: "pdf",
+            description: "Read a learner-provided PDF with pdftotext and return relevant text.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string" },
+                    "question": { "type": "string" }
+                },
+                "required": ["path", "question"]
+            }),
+        },
+    ]
 }
 
 fn teach_tools() -> Vec<ToolSpec> {
@@ -711,6 +877,584 @@ fn list_propositions(data_dir: &Path, session: &str) -> String {
     )
 }
 
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn resolve_path(path: &str) -> PathBuf {
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        path
+    } else {
+        home_dir().join(path)
+    }
+}
+
+fn glob_segment(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let mut dp = vec![vec![false; t.len() + 1]; p.len() + 1];
+    dp[0][0] = true;
+    for i in 1..=p.len() {
+        if p[i - 1] == '*' {
+            dp[i][0] = dp[i - 1][0];
+        }
+    }
+    for i in 1..=p.len() {
+        for j in 1..=t.len() {
+            dp[i][j] = match p[i - 1] {
+                '*' => dp[i - 1][j] || dp[i][j - 1],
+                '?' => dp[i - 1][j - 1],
+                c => dp[i - 1][j - 1] && c == t[j - 1],
+            };
+        }
+    }
+    dp[p.len()][t.len()]
+}
+
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<&str> = pattern.split('/').collect();
+    let t: Vec<&str> = text.split('/').collect();
+    fn walk(p: &[&str], t: &[&str]) -> bool {
+        if p.is_empty() {
+            return t.is_empty();
+        }
+        if p[0] == "**" {
+            return walk(&p[1..], t) || (!t.is_empty() && walk(p, &t[1..]));
+        }
+        !t.is_empty() && glob_segment(p[0], t[0]) && walk(&p[1..], &t[1..])
+    }
+    walk(&p, &t)
+}
+
+fn read_path(path: &str, offset: Option<u64>, limit: Option<u64>) -> String {
+    let resolved = resolve_path(path);
+    if resolved.is_dir() {
+        return list_path(path, None);
+    }
+    let Ok(text) = std::fs::read_to_string(&resolved) else {
+        return format!("read failed: {path} is not a readable UTF-8 file");
+    };
+    let start = offset.unwrap_or(1).saturating_sub(1) as usize;
+    let all: Vec<&str> = text.lines().collect();
+    let take = limit.unwrap_or(2000).min(2000) as usize;
+    if start >= all.len() {
+        return format!(
+            "Offset {} is beyond end of file ({} lines total)",
+            offset.unwrap_or(1),
+            all.len()
+        );
+    }
+    let selected: Vec<&str> = all.iter().skip(start).take(take).copied().collect();
+    let mut body = selected.join("\n");
+    if body.len() > 50_000 {
+        body.truncate(50_000);
+        body.push_str("\n[truncated at 50KB]");
+    }
+    let remaining = all.len().saturating_sub(start + selected.len());
+    if remaining > 0 {
+        body.push_str(&format!(
+            "\n\n[{remaining} more lines. Use offset={} to continue.]",
+            start + selected.len() + 1
+        ));
+    }
+    body
+}
+
+fn list_path(path: &str, limit: Option<u64>) -> String {
+    let resolved = resolve_path(path);
+    let Ok(entries) = std::fs::read_dir(&resolved) else {
+        return format!("ls failed: cannot read {path}");
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if is_dir { format!("{name}/") } else { name }
+        })
+        .collect();
+    names.sort();
+    names.truncate(limit.unwrap_or(500).min(500) as usize);
+    if names.is_empty() {
+        "(empty directory)".to_owned()
+    } else {
+        names.join("\n")
+    }
+}
+
+fn find_files(pattern: &str, base: &str, limit: u64) -> String {
+    let root = resolve_path(base);
+    let mut hits = Vec::new();
+    fn walk(
+        root: &Path,
+        dir: &Path,
+        pattern: &str,
+        hits: &mut Vec<String>,
+        limit: u64,
+        depth: usize,
+    ) {
+        if depth > 64 || hits.len() as u64 >= limit {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if hits.len() as u64 >= limit {
+                return;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if matches!(name.as_str(), "node_modules" | ".git" | "Library") {
+                continue;
+            }
+            let path = entry.path();
+            if path.is_dir() {
+                walk(root, &path, pattern, hits, limit, depth + 1);
+            } else if let Ok(rel) = path.strip_prefix(root)
+                && glob_match(pattern, &rel.to_string_lossy())
+            {
+                hits.push(rel.to_string_lossy().to_string());
+            }
+        }
+    }
+    walk(&root, &root, pattern, &mut hits, limit.min(1000), 0);
+    if hits.is_empty() {
+        format!("No files found matching {pattern}")
+    } else {
+        hits.sort();
+        hits.join("\n")
+    }
+}
+
+fn grep_files(
+    pattern: &str,
+    base: &str,
+    glob: Option<&str>,
+    ignore_case: bool,
+    limit: u64,
+) -> String {
+    let root = resolve_path(base);
+    let needle = if ignore_case {
+        pattern.to_lowercase()
+    } else {
+        pattern.to_owned()
+    };
+    let mut hits = Vec::new();
+    fn walk(
+        root: &Path,
+        dir: &Path,
+        needle: &str,
+        glob: Option<&str>,
+        ignore_case: bool,
+        hits: &mut Vec<String>,
+        limit: u64,
+    ) {
+        if hits.len() as u64 >= limit {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if hits.len() as u64 >= limit {
+                return;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if matches!(name.as_str(), "node_modules" | ".git" | "Library") {
+                continue;
+            }
+            let path = entry.path();
+            if path.is_dir() {
+                walk(root, &path, needle, glob, ignore_case, hits, limit);
+                continue;
+            }
+            let Ok(rel) = path.strip_prefix(root) else {
+                continue;
+            };
+            let rel = rel.to_string_lossy().to_string();
+            if let Some(glob) = glob
+                && !glob_match(glob, &rel)
+                && !glob_match(glob, &name)
+            {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            for (index, line) in text.lines().enumerate() {
+                if hits.len() as u64 >= limit {
+                    return;
+                }
+                let matched = if ignore_case {
+                    line.to_lowercase().contains(needle)
+                } else {
+                    line.contains(needle)
+                };
+                if matched {
+                    let line = if line.chars().count() > 500 {
+                        line.chars().take(500).collect::<String>()
+                    } else {
+                        line.to_owned()
+                    };
+                    hits.push(format!("{rel}:{}: {line}", index + 1));
+                }
+            }
+        }
+    }
+    walk(
+        &root,
+        &root,
+        &needle,
+        glob,
+        ignore_case,
+        &mut hits,
+        limit.min(500),
+    );
+    if hits.is_empty() {
+        format!("No matches for {pattern}")
+    } else {
+        hits.join("\n")
+    }
+}
+
+fn html_to_text(html: &str) -> String {
+    let mut out = String::new();
+    let mut in_tag = false;
+    let mut skip = false;
+    let mut tag = String::new();
+    for ch in html.chars() {
+        if in_tag {
+            if ch == '>' {
+                in_tag = false;
+                let name = tag
+                    .trim_start_matches('/')
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("");
+                if matches!(name, "script" | "style") {
+                    skip = !tag.starts_with('/');
+                }
+                tag.clear();
+                if matches!(tag.as_str(), "p" | "div" | "br" | "li" | "h1" | "h2" | "h3") {
+                    out.push('\n');
+                }
+            } else {
+                tag.push(ch);
+            }
+            continue;
+        }
+        if ch == '<' {
+            in_tag = true;
+            if !out.ends_with(' ') && !out.ends_with('\n') {
+                out.push(' ');
+            }
+            continue;
+        }
+        if !skip {
+            out.push(ch);
+        }
+    }
+    let mut collapsed = String::new();
+    let mut space = false;
+    for ch in out.chars() {
+        if ch.is_whitespace() {
+            if !space {
+                collapsed.push(if ch == '\n' { '\n' } else { ' ' });
+                space = true;
+            }
+        } else {
+            collapsed.push(ch);
+            space = false;
+        }
+    }
+    collapsed
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+}
+
+fn web_fetch_text(url: &str) -> String {
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => return format!("web_fetch failed: {error}"),
+    };
+    let response = match client
+        .get(url)
+        .header("User-Agent", "Mozilla/5.0 (compatible; Brainroom/0.1)")
+        .send()
+    {
+        Ok(response) => response,
+        Err(error) => return format!("web_fetch failed: {error}"),
+    };
+    if !response.status().is_success() {
+        return format!("web_fetch failed: HTTP {}", response.status());
+    }
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    if content_type.contains("application/pdf") {
+        return "web_fetch: this URL is a PDF document — call web_fetch_pdf on it.".to_owned();
+    }
+    let text = match response.text() {
+        Ok(text) => text,
+        Err(error) => return format!("web_fetch failed: {error}"),
+    };
+    let text = if content_type.contains("html") {
+        html_to_text(&text)
+    } else {
+        text
+    };
+    if text.chars().count() > 40_000 {
+        format!(
+            "{}\n\n[Truncated at 40000 characters]",
+            text.chars().take(40_000).collect::<String>()
+        )
+    } else {
+        text
+    }
+}
+
+fn web_search_tavily(query: &str, count: u64) -> String {
+    let Some(key) = brainroom_ai::auth_key("TAVILY_API_KEY") else {
+        return "web_search unavailable: TAVILY_API_KEY is not configured".to_owned();
+    };
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => return format!("web_search failed: {error}"),
+    };
+    let body = json!({
+        "api_key": key,
+        "query": query,
+        "max_results": count.clamp(1, 10),
+        "search_depth": "basic"
+    });
+    let response = client
+        .post("https://api.tavily.com/search")
+        .json(&body)
+        .send();
+    let response = match response {
+        Ok(response) if response.status().is_success() => response,
+        Ok(response) => return format!("web_search failed: HTTP {}", response.status()),
+        Err(error) => return format!("web_search failed: {error}"),
+    };
+    let value: Value = match response.json() {
+        Ok(value) => value,
+        Err(error) => return format!("web_search parse failed: {error}"),
+    };
+    let Some(results) = value.get("results").and_then(Value::as_array) else {
+        return "web_search returned no results".to_owned();
+    };
+    if results.is_empty() {
+        return format!("No results for \"{query}\"");
+    }
+    let mut lines = Vec::new();
+    for result in results {
+        let title = result.get("title").and_then(Value::as_str).unwrap_or("");
+        let url = result.get("url").and_then(Value::as_str).unwrap_or("");
+        let snippet = result.get("content").and_then(Value::as_str).unwrap_or("");
+        lines.push(format!("- {title}\n  {url}\n  {snippet}"));
+    }
+    format!("{} result(s):\n{}", results.len(), lines.join("\n"))
+}
+
+fn pdf_text(path: &str) -> String {
+    let resolved = resolve_path(path);
+    let output = std::process::Command::new("pdftotext")
+        .arg(&resolved)
+        .arg("-")
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            let text = String::from_utf8_lossy(&output.stdout).to_string();
+            if text.chars().count() > 40_000 {
+                format!(
+                    "{}\n\n[Truncated at 40000 characters]",
+                    text.chars().take(40_000).collect::<String>()
+                )
+            } else {
+                text
+            }
+        }
+        Ok(_) => format!(
+            "pdf failed: pdftotext could not read {}",
+            resolved.display()
+        ),
+        Err(error) => format!("pdf failed: pdftotext unavailable ({error})"),
+    }
+}
+
+fn short_hash(seed: &str) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in seed.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:012x}")
+}
+
+fn submit_extraction(data_dir: &Path, args: &Value) -> String {
+    use std::io::Write;
+    let graph = data_dir.join("graph");
+    let _ = std::fs::create_dir_all(&graph);
+    let nodes_path = graph.join("nodes.jsonl");
+    let chains_path = graph.join("chains.jsonl");
+    let existing: Vec<Value> = std::fs::read_to_string(&nodes_path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect();
+    let mut by_name: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for node in &existing {
+        if let (Some(name), Some(id)) = (
+            node.get("name").and_then(Value::as_str),
+            node.get("id").and_then(Value::as_str),
+        ) {
+            by_name
+                .entry(name.to_lowercase())
+                .or_insert_with(|| id.to_owned());
+        }
+    }
+    let mut new_nodes = String::new();
+    let mut added = 0;
+    if let Some(nodes) = args.get("nodes").and_then(Value::as_array) {
+        for node in nodes {
+            let Some(name) = node.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(statement) = node.get("statement").and_then(Value::as_str) else {
+                continue;
+            };
+            if by_name.contains_key(&name.to_lowercase()) {
+                continue;
+            }
+            let id = format!("n_{}", short_hash(&format!("agent:{name}:{statement}")));
+            by_name.insert(name.to_lowercase(), id.clone());
+            let value = json!({
+                "id": id,
+                "name": name,
+                "statement": statement,
+                "aliases": [],
+                "createdAt": brainroom_core::now_iso(),
+                "provenance": [{ "chatId": "agent", "messageId": "" }],
+            });
+            new_nodes.push_str(&value.to_string());
+            new_nodes.push('\n');
+            added += 1;
+        }
+    }
+    if !new_nodes.is_empty()
+        && let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&nodes_path)
+    {
+        let _ = file.write_all(new_nodes.as_bytes());
+    }
+    let mut new_chains = String::new();
+    let mut chain_count = 0;
+    if let Some(chains) = args.get("chains").and_then(Value::as_array) {
+        for chain in chains {
+            let conclusion = chain
+                .get("conclusion")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let Some(conclusion_id) = by_name.get(&conclusion.to_lowercase()).cloned() else {
+                continue;
+            };
+            let mut premises = Vec::new();
+            if let Some(list) = chain.get("premises").and_then(Value::as_array) {
+                for premise in list.iter().filter_map(Value::as_str) {
+                    if let Some(id) = by_name.get(&premise.to_lowercase()) {
+                        premises.push(id.clone());
+                    }
+                }
+            }
+            if premises.is_empty() {
+                continue;
+            }
+            let key = format!("{}=>{conclusion_id}", premises.join(","));
+            let value = json!({
+                "id": format!("arg_{}", short_hash(&format!("agent:{key}"))),
+                "premises": premises,
+                "conclusion": conclusion_id,
+                "createdAt": brainroom_core::now_iso(),
+                "provenance": [{ "chatId": "agent", "messageId": "" }],
+            });
+            new_chains.push_str(&value.to_string());
+            new_chains.push('\n');
+            chain_count += 1;
+        }
+    }
+    if !new_chains.is_empty()
+        && let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&chains_path)
+    {
+        let _ = file.write_all(new_chains.as_bytes());
+    }
+    format!("Recorded {added} proposition(s) and {chain_count} chain(s).")
+}
+
+fn record_job(data_dir: &Path, kind: &str, title: &str, status: &str, result: &str) -> String {
+    let dir = data_dir.join("jobs");
+    let _ = std::fs::create_dir_all(&dir);
+    let id = format!("job_{}", brainroom_core::now_millis());
+    let record = json!({
+        "id": id,
+        "kind": kind,
+        "title": title,
+        "status": status,
+        "result": result,
+        "createdAt": brainroom_core::now_iso(),
+        "updatedAt": brainroom_core::now_iso(),
+    });
+    let _ = std::fs::write(dir.join(format!("{id}.json")), record.to_string());
+    id
+}
+
+fn write_artifact(
+    data_dir: &Path,
+    folder: &str,
+    name: &str,
+    extension: &str,
+    content: &str,
+) -> String {
+    let dir = data_dir.join("artifacts").join(folder);
+    if std::fs::create_dir_all(&dir).is_err() {
+        return "failed to create artifact directory".to_owned();
+    }
+    let slug: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let slug = slug.trim_matches('-');
+    let path = dir.join(format!("{slug}.{extension}"));
+    match std::fs::write(&path, content) {
+        Ok(()) => format!("Saved artifact: {}", path.display()),
+        Err(error) => format!("failed to write artifact: {error}"),
+    }
+}
+
 fn active_problem(messages: &[Message]) -> bool {
     let mut active = false;
     for message in messages {
@@ -1203,10 +1947,201 @@ pub fn run_with_mode(
                         messages.push(tool_result(&call.id, &content));
                         emit_tool_result(&emit, &call.id, &call.name, content, None, false, 0);
                     }
+                    "read" => {
+                        let path = call
+                            .arguments
+                            .get("path")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let offset = call.arguments.get("offset").and_then(Value::as_u64);
+                        let limit = call.arguments.get("limit").and_then(Value::as_u64);
+                        let content = read_path(path, offset, limit);
+                        messages.push(tool_result(&call.id, &content));
+                        emit_tool_result(&emit, &call.id, &call.name, content, None, false, 0);
+                    }
+                    "ls" => {
+                        let path = call
+                            .arguments
+                            .get("path")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let limit = call.arguments.get("limit").and_then(Value::as_u64);
+                        let content = list_path(path, limit);
+                        messages.push(tool_result(&call.id, &content));
+                        emit_tool_result(&emit, &call.id, &call.name, content, None, false, 0);
+                    }
+                    "find" => {
+                        let pattern = call
+                            .arguments
+                            .get("pattern")
+                            .and_then(Value::as_str)
+                            .unwrap_or("*");
+                        let base = call
+                            .arguments
+                            .get("path")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let limit = call
+                            .arguments
+                            .get("limit")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(1000);
+                        let content = find_files(pattern, base, limit);
+                        messages.push(tool_result(&call.id, &content));
+                        emit_tool_result(&emit, &call.id, &call.name, content, None, false, 0);
+                    }
+                    "grep" => {
+                        let pattern = call
+                            .arguments
+                            .get("pattern")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let base = call
+                            .arguments
+                            .get("path")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let glob = call.arguments.get("glob").and_then(Value::as_str);
+                        let ignore_case = call
+                            .arguments
+                            .get("ignoreCase")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        let limit = call
+                            .arguments
+                            .get("limit")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(100);
+                        let content = grep_files(pattern, base, glob, ignore_case, limit);
+                        messages.push(tool_result(&call.id, &content));
+                        emit_tool_result(&emit, &call.id, &call.name, content, None, false, 0);
+                    }
+                    "web_search" => {
+                        let query = call
+                            .arguments
+                            .get("query")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let count = call
+                            .arguments
+                            .get("count")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(5);
+                        let content = web_search_tavily(query, count);
+                        messages.push(tool_result(&call.id, &content));
+                        emit_tool_result(&emit, &call.id, &call.name, content, None, false, 0);
+                    }
+                    "web_fetch" => {
+                        let url = call
+                            .arguments
+                            .get("url")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let content = web_fetch_text(url);
+                        messages.push(tool_result(&call.id, &content));
+                        emit_tool_result(&emit, &call.id, &call.name, content, None, false, 0);
+                    }
+                    "web_fetch_pdf" => {
+                        let url = call
+                            .arguments
+                            .get("url")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let fetched = web_fetch_text(url);
+                        let content = if fetched.starts_with("web_fetch: this URL is a PDF") {
+                            let dir = std::env::temp_dir().join("brainroom-pdf");
+                            let _ = std::fs::create_dir_all(&dir);
+                            let path =
+                                dir.join(format!("download-{}.pdf", brainroom_core::now_millis()));
+                            match reqwest::blocking::get(url).and_then(|response| response.bytes())
+                            {
+                                Ok(bytes) => match std::fs::write(&path, &bytes) {
+                                    Ok(()) => pdf_text(&path.to_string_lossy()),
+                                    Err(error) => format!("web_fetch_pdf failed: {error}"),
+                                },
+                                Err(error) => format!("web_fetch_pdf failed: {error}"),
+                            }
+                        } else {
+                            pdf_text(url)
+                        };
+                        messages.push(tool_result(&call.id, &content));
+                        emit_tool_result(&emit, &call.id, &call.name, content, None, false, 0);
+                    }
+                    "research" => {
+                        let question = call
+                            .arguments
+                            .get("question")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let result = web_search_tavily(question, 5);
+                        let job = record_job(&data_dir, "research", question, "done", &result);
+                        let content = format!("{job}\n\n{result}");
+                        messages.push(tool_result(&call.id, &content));
+                        emit_tool_result(&emit, &call.id, &call.name, content, None, false, 0);
+                    }
+                    "demo" => {
+                        let title = call
+                            .arguments
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .unwrap_or("Demo");
+                        let brief = call
+                            .arguments
+                            .get("brief")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let title = title.replace('<', "&lt;").replace('>', "&gt;");
+                        let brief = brief.replace('<', "&lt;").replace('>', "&gt;");
+                        let html = format!(
+                            "<!doctype html><html><head><meta charset=\"utf-8\"><title>{title}</title></head><body><h1>{title}</h1><p>{brief}</p></body></html>"
+                        );
+                        let result = write_artifact(&data_dir, "demos", &title, "html", &html);
+                        let job = record_job(&data_dir, "demo", &title, "done", &result);
+                        let content = format!("{job}\n\n{result}");
+                        messages.push(tool_result(&call.id, &content));
+                        emit_tool_result(&emit, &call.id, &call.name, content, None, false, 0);
+                    }
+                    "visual" => {
+                        let brief = call
+                            .arguments
+                            .get("brief")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let text = brief
+                            .replace('&', "&amp;")
+                            .replace('<', "&lt;")
+                            .replace('>', "&gt;");
+                        let svg = format!(
+                            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"640\" height=\"360\"><rect width=\"100%\" height=\"100%\" fill=\"#111\"/><text x=\"20\" y=\"40\" fill=\"#eee\" font-family=\"sans-serif\" font-size=\"14\">{text}</text></svg>"
+                        );
+                        let result = write_artifact(&data_dir, "visuals", "figure", "svg", &svg);
+                        let job = record_job(&data_dir, "visual", "figure", "done", &result);
+                        let content = format!("{job}\n\n{result}");
+                        messages.push(tool_result(&call.id, &content));
+                        emit_tool_result(&emit, &call.id, &call.name, content, None, false, 0);
+                    }
+                    "pdf" => {
+                        let path = call
+                            .arguments
+                            .get("path")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        let result = pdf_text(path);
+                        let job = record_job(&data_dir, "pdf", path, "done", &result);
+                        let content = format!("{job}\n\n{result}");
+                        messages.push(tool_result(&call.id, &content));
+                        emit_tool_result(&emit, &call.id, &call.name, content, None, false, 0);
+                    }
+                    "submit_extraction" => {
+                        let content = submit_extraction(&data_dir, &call.arguments);
+                        messages.push(tool_result(&call.id, &content));
+                        emit_tool_result(&emit, &call.id, &call.name, content, None, false, 0);
+                    }
                     "send_to_user" => {
                         let text = call
                             .arguments
-                            .get("text")
+                            .get("message")
+                            .or_else(|| call.arguments.get("text"))
                             .and_then(Value::as_str)
                             .unwrap_or_default()
                             .to_owned();
@@ -1856,10 +2791,43 @@ mod tests {
     }
 
     #[test]
+    fn fs_tools_read_find_and_grep() {
+        let dir = std::env::temp_dir().join(format!("br-fs-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("sub/note.txt"), "alpha\nbeta\ngamma").unwrap();
+        let text = read_path(
+            &dir.join("sub/note.txt").to_string_lossy(),
+            Some(2),
+            Some(1),
+        );
+        assert!(text.contains("beta"));
+        let found = find_files("**/*.txt", &dir.to_string_lossy(), 10);
+        assert!(found.contains("sub/note.txt"));
+        let hits = grep_files("beta", &dir.to_string_lossy(), Some("*.txt"), false, 10);
+        assert!(hits.contains("sub/note.txt:2: beta"));
+        let listed = list_path(&dir.to_string_lossy(), None);
+        assert!(listed.contains("sub/"));
+    }
+
+    #[test]
     fn prober_tools_are_distinct() {
         let names: Vec<&str> = tools_for(Mode::Prober).iter().map(|t| t.name).collect();
         for required in ["probe", "recall", "ask_user_question", "probe_done"] {
             assert!(names.contains(&required), "missing {required}");
+        }
+        for extra in [
+            "read",
+            "ls",
+            "find",
+            "grep",
+            "web_search",
+            "web_fetch",
+            "research",
+            "demo",
+            "visual",
+            "pdf",
+        ] {
+            assert!(names.contains(&extra), "missing {extra}");
         }
         for teacher_only in ["quiz", "explain", "plan_init", "problem"] {
             assert!(!names.contains(&teacher_only), "prober has {teacher_only}");

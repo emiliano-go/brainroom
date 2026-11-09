@@ -27,6 +27,26 @@ pub fn read_json(path: &Path) -> Option<serde_json::Value> {
     serde_json::from_str(&text).ok()
 }
 
+pub fn auth_key(name: &str) -> Option<String> {
+    if let Ok(key) = std::env::var(name)
+        && !key.is_empty()
+    {
+        return Some(key);
+    }
+    for path in [
+        home_dir().join(".config/LearnHarness/auth.json"),
+        home_dir().join(".config/Brainroom/auth.json"),
+    ] {
+        if let Some(value) = read_json(&path)
+            && let Some(key) = value.get(name).and_then(|v| v.as_str())
+            && !key.is_empty()
+        {
+            return Some(key.to_owned());
+        }
+    }
+    None
+}
+
 pub fn api_key() -> Option<String> {
     if let Ok(key) = std::env::var("OPENROUTER_API_KEY")
         && !key.is_empty()
