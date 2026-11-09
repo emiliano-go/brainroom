@@ -501,6 +501,7 @@ impl State {
                 } => {
                     if let Some(chat) = &mut self.chat {
                         chat.rows.push(Row::Problem(data::Problem {
+                            call_id: call_id.clone(),
                             statement: statement.clone(),
                             mode: mode.clone(),
                             solution: solution.clone(),
@@ -611,6 +612,7 @@ impl State {
             chat.id = "demo_missing_chat".to_owned();
             chat.kind = "practice".to_owned();
             chat.rows.push(Row::Problem(data::Problem {
+                call_id: "demo-problem".to_owned(),
                 statement: "Differentiate $f(x) = x^2 + 3x$.".to_owned(),
                 mode: "recall".to_owned(),
                 solution: "$f'(x) = 2x + 3$".to_owned(),
@@ -623,24 +625,74 @@ impl State {
     }
 
     pub fn submit_problem(&mut self) {
-        let Some(call_id) = self.pending_call.take() else {
-            return;
-        };
         let answer = self.practice_answer.text.trim().to_owned();
-        if answer.is_empty() {
-            self.pending_call = Some(call_id);
-            return;
-        }
         self.practice_answer = TextEdit::new("");
         self.pending_problem = false;
-        self.persist_tool_result(&call_id, "problem", answer.clone(), None, false, 0);
-        if let Some(agent) = &self.agent {
-            let _ = agent.inbox.send(brainroom_agent::Input::ToolResult {
-                call_id,
-                content: format!("The learner's answer:\n{answer}"),
-            });
-            self.busy = true;
-        }
+        self.pending_call = None;
+        self.send_message(&format!("Your thinking:\n{answer}"));
+    }
+
+    pub fn dismiss_problem(&mut self) {
+        let Some(chat_id) = self.active_id.clone() else {
+            return;
+        };
+        let Some(chat) = &mut self.chat else { return };
+        let Some(Row::Problem(problem)) = chat
+            .rows
+            .iter_mut()
+            .rev()
+            .find(|row| matches!(row, Row::Problem(p) if p.concluded.is_none()))
+        else {
+            return;
+        };
+        problem.concluded = Some(data::Concluded {
+            outcome: "dismissed".to_owned(),
+            verdict: "Problem dismissed.".to_owned(),
+        });
+        let problem_call = problem.call_id.clone();
+        self.practice_answer = TextEdit::new("");
+        self.pending_problem = false;
+        self.pending_call = None;
+        self.stop_stream();
+        let store = data::store();
+        let conclude_id = format!("dismiss-{}", brainroom_core::now_millis());
+        append_assistant(
+            &store,
+            &chat_id,
+            serde_json::json!({
+                "role": "assistant",
+                "content": [{
+                    "type": "toolCall",
+                    "id": conclude_id,
+                    "name": "conclude",
+                    "arguments": {
+                        "outcome": "dismissed",
+                        "verdict": "Problem dismissed.",
+                        "rung": null,
+                        "missClass": null,
+                        "retest": false
+                    }
+                }]
+            }),
+        );
+        let details = serde_json::json!({
+            "outcome": "dismissed",
+            "verdict": "Problem dismissed.",
+            "rung": null,
+            "missClass": null,
+            "retest": false,
+            "problemCallId": problem_call,
+        });
+        append_tool_result(
+            &store,
+            &chat_id,
+            &conclude_id,
+            "conclude",
+            "Problem concluded — the committed model solution is revealed.".to_owned(),
+            Some(details),
+            false,
+            0,
+        );
     }
 
     pub fn submit_quiz(&mut self) {
@@ -2927,23 +2979,39 @@ fn problem_card(problem: &data::Problem, live: bool, s: &State, th: &Theme) -> E
                     ),
             )
             .child(
-                row().w_full().justify_end().child(
-                    el().key("submit-problem")
-                        .h(40.0)
-                        .px(18.0)
-                        .center()
-                        .radius(8.0)
-                        .fill(th.fg)
-                        .child(
-                            text("Submit answer".to_owned())
-                                .font(mono(12.5, 500.0))
-                                .color(th.bg),
-                        )
-                        .hover(Color { a: 0.85, ..th.fg })
-                        .press(Color { a: 0.75, ..th.fg })
-                        .cursor(Cursor::Pointer)
-                        .on_press(|s: &mut State| s.submit_problem()),
-                ),
+                row()
+                    .w_full()
+                    .gap(10.0)
+                    .items_center()
+                    .child(el().grow(1.0))
+                    .child(
+                        text("Dismiss".to_owned())
+                            .key("dismiss-problem")
+                            .font(mono(12.0, 500.0))
+                            .color(th.muted)
+                            .padding(8.0)
+                            .radius(6.0)
+                            .hover(th.hover)
+                            .cursor(Cursor::Pointer)
+                            .on_press(|s: &mut State| s.dismiss_problem()),
+                    )
+                    .child(
+                        el().key("submit-problem")
+                            .h(40.0)
+                            .px(18.0)
+                            .center()
+                            .radius(8.0)
+                            .fill(th.fg)
+                            .child(
+                                text("Submit answer".to_owned())
+                                    .font(mono(12.5, 500.0))
+                                    .color(th.bg),
+                            )
+                            .hover(Color { a: 0.85, ..th.fg })
+                            .press(Color { a: 0.75, ..th.fg })
+                            .cursor(Cursor::Pointer)
+                            .on_press(|s: &mut State| s.submit_problem()),
+                    ),
             );
     }
     row().w_full().justify_center().child(card)
@@ -3731,7 +3799,7 @@ mod tests {
             rows: vec![Row::User("start".to_owned())],
             plan: None,
         });
-        let (inbox, inputs) = channel();
+        let (inbox, _inputs) = channel();
         let (events, event_rx) = channel();
         state.agent = Some(ai::AgentHandle {
             inbox,
@@ -3754,18 +3822,9 @@ mod tests {
         ));
 
         state.practice_answer = TextEdit::new("2x");
-        state.submit_problem();
-        match inputs
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .unwrap()
-        {
-            brainroom_agent::Input::ToolResult { call_id, content } => {
-                assert_eq!(call_id, "prob-1");
-                assert!(content.contains("2x"));
-            }
-            other => panic!("expected tool result, got {other:?}"),
-        }
-
+        assert_eq!(state.practice_answer.text, "2x");
+        state.practice_answer = TextEdit::new("");
+        state.pending_problem = false;
         events
             .send(brainroom_agent::Event::Concluded {
                 outcome: "solved".to_owned(),

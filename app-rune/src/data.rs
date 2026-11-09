@@ -52,6 +52,7 @@ pub struct Concluded {
 
 #[derive(Clone, Debug)]
 pub struct Problem {
+    pub call_id: String,
     pub statement: String,
     pub mode: String,
     pub solution: String,
@@ -977,6 +978,11 @@ pub fn load_chat(store: &Store, id: &str) -> Option<Chat> {
                             .to_owned();
                         if !statement.is_empty() {
                             rows.push(Row::Problem(Problem {
+                                call_id: part
+                                    .get("id")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_owned(),
                                 statement,
                                 mode: args
                                     .get("mode")

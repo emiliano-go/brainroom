@@ -341,6 +341,11 @@ fn practice_tools() -> Vec<ToolSpec> {
                 "properties": {
                     "statement": { "type": "string" },
                     "mode": { "type": "string", "enum": ["recall", "discrimination", "composition"] },
+                    "target": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional proposition ids/names exercised; omit for untagged problems."
+                    },
                     "modelSolution": { "type": "string" }
                 },
                 "required": ["statement", "mode", "modelSolution"]
@@ -353,9 +358,12 @@ fn practice_tools() -> Vec<ToolSpec> {
                 "type": "object",
                 "properties": {
                     "outcome": { "type": "string", "enum": ["solved", "solvedWithHints", "movedOn", "surrendered", "dismissed"] },
-                    "verdict": { "type": "string" }
+                    "verdict": { "type": "string" },
+                    "rung": { "type": ["string", "null"], "enum": ["R0", "R1", "R2", "R3", "R4", "R5", null] },
+                    "missClass": { "type": ["string", "null"], "enum": ["cue", "discrimination", "execution", "careless", "structural", null] },
+                    "retest": { "type": "boolean" }
                 },
-                "required": ["outcome", "verdict"]
+                "required": ["outcome", "verdict", "rung", "missClass", "retest"]
             }),
         },
         ToolSpec {
@@ -577,6 +585,42 @@ fn list_propositions(data_dir: &Path) -> String {
     serde_json::to_string(&nodes).unwrap_or_else(|_| "[]".to_owned())
 }
 
+fn active_problem(messages: &[Message]) -> bool {
+    let mut active = false;
+    for message in messages {
+        let Some(calls) = message.get("tool_calls").and_then(Value::as_array) else {
+            continue;
+        };
+        for call in calls {
+            match call.pointer("/function/name").and_then(Value::as_str) {
+                Some("problem") => active = true,
+                Some("conclude") => active = false,
+                _ => {}
+            }
+        }
+    }
+    active
+}
+
+fn known_graph_targets(data_dir: &Path) -> Vec<(String, String)> {
+    let path = data_dir.join("graph/nodes.jsonl");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|node| {
+            Some((
+                node.get("id").and_then(Value::as_str)?.to_owned(),
+                node.get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_lowercase(),
+            ))
+        })
+        .collect()
+}
+
 struct MermaidPlan {
     nodes: Vec<(String, String)>,
     problems: Vec<String>,
@@ -736,6 +780,7 @@ pub fn run_with_mode(
     let mut problem_solution: Option<String> = None;
     let mut messages = vec![system_message(mode, &data_dir)];
     let mut plan_nodes = existing_plan_nodes(&initial);
+    let mut problem_active = active_problem(&initial);
     messages.extend(initial);
     while let Ok(first) = inbox.recv() {
         match first {
@@ -772,9 +817,44 @@ pub fn run_with_mode(
             }
             let mut blocking: Option<(String, String)> = None;
             let mut question_posed = false;
+            let mut terminate_turn = false;
             for call in &turn.tool_calls {
                 match call.name.as_str() {
                     "problem" => {
+                        if problem_active {
+                            let content =
+                                "a problem is already active — call conclude on it before posing the next"
+                                    .to_owned();
+                            messages.push(tool_result(&call.id, &content));
+                            emit_tool_result(&emit, &call.id, &call.name, content, None, true, 0);
+                            continue;
+                        }
+                        if let Some(targets) =
+                            call.arguments.get("target").and_then(Value::as_array)
+                            && !targets.is_empty()
+                        {
+                            let known = known_graph_targets(&data_dir);
+                            let unknown: Vec<&str> = targets
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .filter(|target| {
+                                    let lower = target.to_lowercase();
+                                    !known
+                                        .iter()
+                                        .any(|(id, name)| id == target || *name == lower)
+                                })
+                                .collect();
+                            if !unknown.is_empty() {
+                                let content = format!(
+                                    "target {unknown:?} is not a known proposition — use graph ids/names, or omit target entirely"
+                                );
+                                messages.push(tool_result(&call.id, &content));
+                                emit_tool_result(
+                                    &emit, &call.id, &call.name, content, None, true, 0,
+                                );
+                                continue;
+                            }
+                        }
                         let statement = call
                             .arguments
                             .get("statement")
@@ -794,15 +874,27 @@ pub fn run_with_mode(
                             .unwrap_or_default()
                             .to_owned();
                         problem_solution = Some(solution.clone());
+                        problem_active = true;
                         let _ = emit.send(Event::Problem {
                             call_id: call.id.clone(),
                             statement,
                             mode: mode_name,
                             solution,
                         });
-                        blocking = Some((call.id.clone(), String::new()));
+                        let content = "Problem posed — the turn ends here; the learner's thinking traces and answer commits arrive as labeled messages.".to_owned();
+                        messages.push(tool_result(&call.id, &content));
+                        emit_tool_result(&emit, &call.id, &call.name, content, None, false, 0);
+                        terminate_turn = true;
                     }
                     "conclude" => {
+                        if !problem_active {
+                            let content =
+                                "no active problem to conclude — pose one first".to_owned();
+                            messages.push(tool_result(&call.id, &content));
+                            emit_tool_result(&emit, &call.id, &call.name, content, None, true, 0);
+                            continue;
+                        }
+                        problem_active = false;
                         let outcome = call
                             .arguments
                             .get("outcome")
@@ -816,17 +908,27 @@ pub fn run_with_mode(
                             .unwrap_or_default()
                             .to_owned();
                         let _ = emit.send(Event::Concluded {
-                            outcome,
-                            verdict,
+                            outcome: outcome.clone(),
+                            verdict: verdict.clone(),
                             solution: problem_solution.take().unwrap_or_default(),
                         });
-                        messages.push(tool_result(&call.id, "Recorded."));
+                        let content =
+                            "Problem concluded — the committed model solution is revealed."
+                                .to_owned();
+                        let details = json!({
+                            "outcome": outcome,
+                            "verdict": verdict,
+                            "rung": call.arguments.get("rung").cloned().unwrap_or(Value::Null),
+                            "missClass": call.arguments.get("missClass").cloned().unwrap_or(Value::Null),
+                            "retest": call.arguments.get("retest").and_then(Value::as_bool).unwrap_or(false),
+                        });
+                        messages.push(tool_result(&call.id, &content));
                         emit_tool_result(
                             &emit,
                             &call.id,
-                            "conclude",
-                            "Recorded.".to_owned(),
-                            None,
+                            &call.name,
+                            content,
+                            Some(details),
                             false,
                             0,
                         );
@@ -994,6 +1096,10 @@ pub fn run_with_mode(
                         emit_tool_result(&emit, &call.id, &call.name, content, None, true, 0);
                     }
                 }
+            }
+            if terminate_turn {
+                let _ = emit.send(Event::Done);
+                break;
             }
             if let Some((call_id, _)) = blocking {
                 match inbox.recv() {
@@ -1374,12 +1480,10 @@ mod tests {
         assert_eq!(statement, "Differentiate x^2.");
         assert_eq!(mode, "recall");
         assert_eq!(solution, "2x");
+        assert!(matches!(recv_app(&out_rx), Event::Done));
 
         in_tx
-            .send(Input::ToolResult {
-                call_id: "prob-1".to_owned(),
-                content: "2x".to_owned(),
-            })
+            .send(Input::User("Your thinking:\n2x".to_owned()))
             .unwrap();
         let Event::Concluded {
             outcome,
@@ -1465,6 +1569,67 @@ mod tests {
                     error = true;
                 }
                 Event::Quiz { .. } => posed = true,
+                Event::Done => break,
+                _ => {}
+            }
+        }
+        assert!(error);
+        assert!(!posed);
+    }
+
+    #[test]
+    fn practice_rejects_a_second_active_problem() {
+        let initial = vec![serde_json::json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{
+                "id": "old",
+                "type": "function",
+                "function": {"name": "problem", "arguments": "{\"statement\":\"old\"}"}
+            }]
+        })];
+        let next = AssistantTurn {
+            text: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "new".to_owned(),
+                name: "problem".to_owned(),
+                arguments: json!({"statement": "new", "mode": "recall", "modelSolution": "x"}),
+            }],
+            usage: None,
+            ..Default::default()
+        };
+        let done = AssistantTurn {
+            text: "Retry.".to_owned(),
+            tool_calls: vec![],
+            usage: None,
+            ..Default::default()
+        };
+        let (fake, _) = Fake::new(vec![next, done]);
+        let (in_tx, in_rx) = mpsc::channel();
+        let (out_tx, out_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            run_with_mode(
+                &fake,
+                PathBuf::from("/tmp"),
+                initial,
+                in_rx,
+                out_tx,
+                Mode::Practice,
+            )
+        });
+        in_tx.send(Input::User("next".to_owned())).unwrap();
+        let mut error = false;
+        let mut posed = false;
+        loop {
+            match recv(&out_rx) {
+                Event::ToolResult {
+                    is_error, content, ..
+                } => {
+                    assert!(is_error);
+                    assert!(content.contains("already active"));
+                    error = true;
+                }
+                Event::Problem { .. } => posed = true,
                 Event::Done => break,
                 _ => {}
             }
