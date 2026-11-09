@@ -799,7 +799,11 @@ fn sidebar(s: &State, th: &Theme) -> El {
         } else {
             let mut title_row = row().w_full().items_center().child(
                 text(session.title.clone())
-                    .font(mono(14.0, 500.0))
+                    .font(
+                        rune::TextStyle::new(15.0, 600.0)
+                            .family(rune::Family::Named("Source Sans 3"))
+                            .lh(21.0),
+                    )
                     .color(th.fg)
                     .grow(1.0),
             );
@@ -986,8 +990,7 @@ fn sidebar(s: &State, th: &Theme) -> El {
                                 .font(mono(11.0, 500.0))
                                 .color(th.muted),
                         )
-                        .child(el().grow(1.0))
-                        .child(text(s.cost.clone()).font(mono(11.0, 400.0)).color(th.muted)),
+                        .child(el().grow(1.0)),
                 )
                 .child(
                     row()
@@ -1169,7 +1172,7 @@ fn home(s: &State, th: &Theme) -> El {
     let search = text_input(&s.graph_search, mono(13.0, 400.0))
         .key("graph-search")
         .single_line()
-        .w(260.0)
+        .w(620.0)
         .h(34.0)
         .px(34.0)
         .pt(8.0)
@@ -1200,15 +1203,12 @@ fn home(s: &State, th: &Theme) -> El {
         })
         .child(el().grow(1.0))
         .child(
-            row()
-                .gap(8.0)
-                .items_center()
-                .child(
-                    el().size(16.0, 16.0)
-                        .absolute(12.0, 9.0)
-                        .child(icon(&theme::SEARCH, 14.0).color(th.faint)),
-                )
-                .child(search),
+            row().gap(0.0).items_center().child(search).child(
+                el().size(14.0, 14.0)
+                    .absolute(12.0, 10.0)
+                    .child(icon(&theme::SEARCH, 14.0).color(th.faint))
+                    .a11y_hidden(),
+            ),
         )
         .child(
             top_pill("chains", &theme::CHAIN, "Chains", th, true)
@@ -1231,8 +1231,14 @@ fn home(s: &State, th: &Theme) -> El {
             ),
         )
         .child(
-            icon_button("home-settings", &theme::SETTINGS, 17.0, th, th.muted)
-                .on_press(|s: &mut State| s.settings_open = true),
+            col()
+                .gap(0.0)
+                .items_end()
+                .child(
+                    icon_button("home-settings", &theme::SETTINGS, 17.0, th, th.muted)
+                        .on_press(|s: &mut State| s.settings_open = true),
+                )
+                .child(text(s.cost.clone()).font(mono(10.0, 400.0)).color(th.muted)),
         )
         .window_drag();
 
@@ -1529,13 +1535,16 @@ fn mode_tab(index: usize, label: &str, glyph: &'static rune::Icon, s: &State, th
 }
 
 fn model_pill(s: &State, th: &Theme) -> El {
-    let name = if s.model.len() > 22 {
-        format!("{}…", &s.model[..21])
+    let short = s.model.rsplit('/').next().unwrap_or(&s.model);
+    let name = if short.chars().count() > 26 {
+        let cut: String = short.chars().take(25).collect();
+        format!("{cut}…")
     } else {
-        s.model.clone()
+        short.to_owned()
     };
     row()
         .key("model-pill")
+        .w(198.0)
         .h(30.0)
         .px(10.0)
         .gap(6.0)
@@ -1543,7 +1552,13 @@ fn model_pill(s: &State, th: &Theme) -> El {
         .radius(8.0)
         .fill(th.card)
         .border(1.0, th.border_soft)
-        .child(text(name).font(mono(11.0, 400.0)).color(th.muted))
+        .child(
+            text(name)
+                .font(mono(11.0, 400.0))
+                .color(th.muted)
+                .grow(1.0)
+                .max_w(160.0),
+        )
         .child(icon(&theme::CHEVRON_DOWN, 12.0).color(th.muted))
         .hover(th.hover)
         .cursor(Cursor::Pointer)
@@ -1578,7 +1593,7 @@ fn session(s: &State, th: &Theme) -> El {
             )
             .on_press(|s: &mut State| s.sidebar = true)
         })
-        .child(text(title).font(serif(28.0, 700.0)).color(th.fg).grow(1.0))
+        .child(text(title).font(serif(36.0, 700.0)).color(th.fg).grow(1.0))
         .child(
             top_pill("plan", &theme::PLAN, "PLAN", th, false)
                 .on_press(|s: &mut State| s.plan_open = true),
@@ -1649,9 +1664,8 @@ fn session(s: &State, th: &Theme) -> El {
         .child(
             row()
                 .w_full()
-                .justify_center()
-                .px(24.0)
-                .child(transcript.max_w(1040.0)),
+                .px(32.0)
+                .child(transcript.max_w(1544.0).grow(1.0)),
         );
 
     col()
@@ -1662,7 +1676,6 @@ fn session(s: &State, th: &Theme) -> El {
         .child(scroll)
         .child(reply_bar(s, th))
         .child(stats_bar(s, th))
-        .child(minimap(s, th).pin(None, Some(540.0), Some(12.0), None))
 }
 
 fn plan_window(s: &State, th: &Theme) -> El {
@@ -1807,8 +1820,8 @@ fn reply_bar(s: &State, th: &Theme) -> El {
         });
     row().w_full().justify_center().py(8.0).child(
         row()
-            .w(1040.0)
-            .h(50.0)
+            .w(700.0)
+            .h(48.0)
             .px(14.0)
             .gap(8.0)
             .items_center()
@@ -1822,7 +1835,7 @@ fn reply_bar(s: &State, th: &Theme) -> El {
                     .shrink()
                     .h(36.0)
                     .pt(6.0)
-                    .placeholder("Reply to your tutor…", th.faint)
+                    .placeholder("Ask, answer, or steer the lesson…", th.faint)
                     .color(th.fg)
                     .fill(Color::TRANSPARENT)
                     .on_edit(|s: &mut State| &mut s.reply)
@@ -1835,54 +1848,9 @@ fn reply_bar(s: &State, th: &Theme) -> El {
     )
 }
 
-fn minimap(s: &State, th: &Theme) -> El {
-    let g = &s.graph;
-    let (w, h) = (150.0, 150.0);
-    let mut edges = Shape::new();
-    let mut dots = Shape::new();
-    let px = |n: &data::Node| [10.0 + n.x * (w - 20.0), 10.0 + n.y * (h - 20.0)];
-    for (a, b) in g.edges.iter().take(200) {
-        if let (Some(a), Some(b)) = (g.nodes.get(*a), g.nodes.get(*b)) {
-            edges = edges.line(
-                px(a),
-                px(b),
-                0.5,
-                LineCap::Butt,
-                Color {
-                    a: 0.30,
-                    ..th.muted
-                },
-            );
-        }
-    }
-    for node in &g.nodes {
-        let c = px(node);
-        let mut pts = Vec::with_capacity(6);
-        for i in 0..6 {
-            let a = i as f32 * std::f32::consts::TAU / 6.0;
-            pts.push([c[0] + a.cos() * 1.4, c[1] + a.sin() * 1.4]);
-        }
-        dots = dots.fill(pts, Color { a: 0.7, ..th.fg });
-    }
-    col()
-        .key("plan-minimap")
-        .size(w, h)
-        .radius(10.0)
-        .fill(Color { a: 0.55, ..th.bg })
-        .border(1.0, th.border_soft)
-        .child(
-            el().size(w, h)
-                .absolute(0.0, 0.0)
-                .shape(edges)
-                .a11y_hidden(),
-        )
-        .child(el().size(w, h).absolute(0.0, 0.0).shape(dots).a11y_hidden())
-}
-
 fn quiz_card(quiz: &data::Quiz, live: bool, s: &State, th: &Theme) -> El {
     let mut card = col()
         .w_full()
-        .max_w(740.0)
         .gap(10.0)
         .padding(16.0)
         .radius(12.0)
@@ -1961,7 +1929,7 @@ fn quiz_card(quiz: &data::Quiz, live: bool, s: &State, th: &Theme) -> El {
                     .child(text(label.to_owned()).font(mono(11.0, 500.0)).color(color)),
             );
         }
-        return row().w_full().justify_center().child(card);
+        return row().w_full().child(card);
     }
 
     // "I don't know"
@@ -2031,7 +1999,7 @@ fn quiz_card(quiz: &data::Quiz, live: bool, s: &State, th: &Theme) -> El {
                     .cursor(Cursor::Pointer)
                     .on_drag(|s: &mut State, d: &mut rune::Drag, _| {
                         if d.w > 0.0 {
-                            s.confidence = (d.x / d.w).clamp(0.0, 1.0);
+                            s.confidence = ((d.x / d.w).clamp(0.0, 1.0) * 10.0).round() / 10.0;
                         }
                     }),
             )
@@ -2084,7 +2052,7 @@ fn quiz_card(quiz: &data::Quiz, live: bool, s: &State, th: &Theme) -> El {
             .w_full()
             .items_center()
             .child(
-                text("↵ submits · ⇥ newline".to_owned())
+                text("Enter submits · Tab newline".to_owned())
                     .font(mono(11.0, 400.0))
                     .color(th.faint)
                     .grow(1.0),
@@ -2426,48 +2394,72 @@ fn node_rename_modal(s: &State, th: &Theme) -> El {
 }
 
 fn stats_bar(s: &State, th: &Theme) -> El {
-    let mut meter = Shape::new();
-    for i in 0..44 {
-        let x = i as f32 * 4.0;
-        let h = 4.0 + ((i * 37) % 11) as f32;
-        let c = if i < 30 { th.fg } else { th.border };
-        meter = meter.line([x, 14.0], [x, 14.0 - h], 1.6, LineCap::Round, c);
-    }
-    row().w_full().h(46.0).px(24.0).justify_center().child(
-        row()
-            .w_full()
-            .max_w(1040.0)
-            .h(46.0)
-            .gap(12.0)
-            .items_center()
+    row().w_full().h(58.0).justify_center().child(
+        col()
+            .w(700.0)
+            .gap(0.0)
             .child(
-                text("83.7k / 1M · $0.1716".to_owned())
-                    .font(mono(11.0, 400.0))
-                    .color(th.muted),
-            )
-            .child(if s.busy {
                 row()
-                    .h(28.0)
-                    .px(10.0)
-                    .gap(6.0)
+                    .w_full()
+                    .h(18.0)
                     .items_center()
-                    .radius(8.0)
-                    .fill(th.card)
-                    .border(1.0, th.border_soft)
-                    .child(icon(&theme::STOP, 12.0).color(th.red))
-                    .child(text("Stop".to_owned()).font(mono(11.0, 500.0)).color(th.fg))
-                    .hover(th.hover)
-                    .cursor(Cursor::Pointer)
-                    .on_press(|s: &mut State| s.stop_stream())
-            } else {
-                el()
-            })
-            .child(el().size(178.0, 16.0).shape(meter))
-            .child(el().grow(1.0))
-            .child(model_pill(s, th))
+                    .gap(10.0)
+                    .child(
+                        text(format!("0 / 0 · {}", s.cost))
+                            .font(mono(11.0, 400.0))
+                            .color(th.muted),
+                    )
+                    .child(if s.busy {
+                        row()
+                            .h(20.0)
+                            .px(8.0)
+                            .gap(5.0)
+                            .items_center()
+                            .radius(6.0)
+                            .fill(th.card)
+                            .border(1.0, th.border_soft)
+                            .child(icon(&theme::STOP, 11.0).color(th.red))
+                            .child(text("Stop".to_owned()).font(mono(11.0, 500.0)).color(th.fg))
+                            .hover(th.hover)
+                            .cursor(Cursor::Pointer)
+                            .on_press(|s: &mut State| s.stop_stream())
+                    } else {
+                        el()
+                    }),
+            )
             .child(
-                top_pill("effort-session", &theme::CHEVRON_DOWN, &s.effort, th, true)
-                    .on_press(|s: &mut State| s.effort_menu_open = true),
+                row()
+                    .w_full()
+                    .h(32.0)
+                    .gap(10.0)
+                    .items_center()
+                    .justify_end()
+                    .child(
+                        row()
+                            .key("dictate")
+                            .h(32.0)
+                            .w(218.0)
+                            .items_center()
+                            .justify_center()
+                            .gap(7.0)
+                            .radius(8.0)
+                            .fill(th.card)
+                            .border(1.0, th.border_soft)
+                            .child(icon(&theme::MIC, 14.0).color(th.muted))
+                            .child(
+                                text("Dictate".to_owned())
+                                    .font(mono(11.0, 400.0))
+                                    .color(th.muted),
+                            )
+                            .hover(th.hover)
+                            .cursor(Cursor::Pointer)
+                            .on_press(|s: &mut State| s.dictate_open = true),
+                    )
+                    .child(model_pill(s, th))
+                    .child(
+                        top_pill("effort-session", &theme::CHEVRON_DOWN, &s.effort, th, true)
+                            .on_press(|s: &mut State| s.effort_menu_open = true),
+                    ),
             ),
     )
 }

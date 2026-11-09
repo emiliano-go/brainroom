@@ -46,14 +46,14 @@ pub fn theme(dark: bool) -> Theme {
     if dark {
         Theme {
             dark,
-            bg: rgb(0x141414),
-            card: rgb(0x1c1c1c),
-            raised: rgb(0x242424),
-            border: rgb(0x434343),
-            border_soft: rgb(0x2a2a2a),
+            bg: rgb(0x0b0d0e),
+            card: rgb(0x141618),
+            raised: rgb(0x1b1e21),
+            border: rgb(0x30353a),
+            border_soft: rgb(0x22262a),
             fg: rgb(0xe6e6e6),
-            muted: rgb(0x8d8d8d),
-            faint: rgb(0x6b6b6b),
+            muted: rgb(0x8b8f94),
+            faint: rgb(0x5b6066),
             hover: rgba(0xffffff, 0.04),
             pressed: rgba(0xffffff, 0.07),
             gold: rgb(0xe6b450),
@@ -110,7 +110,7 @@ pub fn section_title() -> TextStyle {
 pub const ICON_MARK: Icon = Icon {
     name: "lh-mark",
     view: 24.0,
-    body: r#"<path d="M12 2c3 4.2 6.5 5.5 10 5.5-1.6 3.7-4.3 5.6-7 6.4 2.7.8 5.4 2.7 7 6.4-3.5 0-7 1.3-10 5.5-3-4.2-6.5-5.5-10-5.5 1.6-3.7 4.3-5.6 7-6.4-2.7-.8-5.4-2.7-7-6.4 3.5 0 7-1.3 10-5.5Z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>"#,
+    body: r#"<circle cx="9.5" cy="12" r="6.2" fill="currentColor"/><circle cx="15" cy="12" r="5.6" stroke="currentColor" stroke-width="1.6"/>"#,
 };
 
 pub const PANEL_LEFT: Icon = Icon {

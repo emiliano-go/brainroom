@@ -15,7 +15,7 @@ fn inline_code_bg(th: &Theme) -> Color {
     }
 }
 
-enum Tok {
+pub(crate) enum Tok {
     Text(String),
     Bold(String),
     Italic(String),
@@ -23,7 +23,7 @@ enum Tok {
     Math(String),
 }
 
-fn tokenize(src: &str) -> Vec<Tok> {
+pub(crate) fn tokenize(src: &str) -> Vec<Tok> {
     let bytes = src.as_bytes();
     let mut out = Vec::new();
     let mut plain = String::new();
@@ -92,39 +92,60 @@ pub fn para(src: &str, th: &Theme) -> El {
     let mut content = String::new();
     let mut spans: Vec<Span> = Vec::new();
     let mut icons: Vec<(usize, InlineIcon)> = Vec::new();
-    for tok in tokenize(src) {
-        match tok {
-            Tok::Text(s) => content.push_str(&s),
-            Tok::Bold(s) => {
-                let start = content.len();
-                content.push_str(&s);
-                spans.push(Span::new(start, content.len()).weight(650.0));
-            }
-            Tok::Italic(s) => {
-                let start = content.len();
-                content.push_str(&s);
-                spans.push(Span::new(start, content.len()).italic());
-            }
-            Tok::Code(s) => {
-                let start = content.len();
-                content.push_str(&s);
-                spans.push(
-                    Span::new(start, content.len())
+    fn append(
+        content: &mut String,
+        spans: &mut Vec<Span>,
+        icons: &mut Vec<(usize, InlineIcon)>,
+        src: &str,
+        weight: f32,
+        italic: bool,
+        th: &Theme,
+    ) {
+        for tok in tokenize(src) {
+            match tok {
+                Tok::Text(s) => {
+                    let start = content.len();
+                    content.push_str(&s);
+                    if weight > 400.0 || italic {
+                        let mut span = Span::new(start, content.len());
+                        if weight > 400.0 {
+                            span = span.weight(weight);
+                        }
+                        if italic {
+                            span = span.italic();
+                        }
+                        spans.push(span);
+                    }
+                }
+                Tok::Bold(s) => append(content, spans, icons, &s, 650.0, italic, th),
+                Tok::Italic(s) => append(content, spans, icons, &s, weight, true, th),
+                Tok::Code(s) => {
+                    let start = content.len();
+                    content.push_str(&s);
+                    let mut span = Span::new(start, content.len())
                         .mono()
-                        .bg(inline_code_bg(th), 3.0),
-                );
-            }
-            Tok::Math(tex) => {
-                let at = content.len();
-                content.push('\u{200b}');
-                if let Some(image) = math::render(&tex, false, 32.0, th.fg) {
-                    let pixels = math::square(&image);
-                    let side = image.width.max(image.height) as f32 / 2.0;
-                    icons.push((at, InlineIcon::image(pixels).size(side).gap(2.0)));
+                        .bg(inline_code_bg(th), 3.0);
+                    if weight > 400.0 {
+                        span = span.weight(weight);
+                    }
+                    if italic {
+                        span = span.italic();
+                    }
+                    spans.push(span);
+                }
+                Tok::Math(tex) => {
+                    let at = content.len();
+                    content.push('\u{200b}');
+                    if let Some(image) = math::render(&tex, false, 32.0, th.fg) {
+                        let pixels = math::square(&image);
+                        let side = image.width.max(image.height) as f32 / 2.0;
+                        icons.push((at, InlineIcon::image(pixels).size(side).gap(2.0)));
+                    }
                 }
             }
         }
     }
+    append(&mut content, &mut spans, &mut icons, src, 400.0, false, th);
     if content.is_empty() {
         return el().h(0.0);
     }
@@ -195,6 +216,43 @@ pub fn blocks(blocks: &[Block], th: &Theme) -> El {
                 }
                 out = out.child(list);
             }
+            Block::Numbered(items) => {
+                let mut list = col().w_full().gap(6.0);
+                for (n, item) in items.iter() {
+                    list = list.child(
+                        row()
+                            .w_full()
+                            .gap(10.0)
+                            .child(text(format!("{n}.")).font(prose()).color(th.muted).w(22.0))
+                            .child(para(item, th).grow(1.0)),
+                    );
+                }
+                out = out.child(list);
+            }
+            Block::Table(rows) => {
+                let mut table = col()
+                    .w_full()
+                    .radius(8.0)
+                    .border(1.0, th.border_soft)
+                    .clip_rounded(8.0);
+                for (r, row_) in rows.iter().enumerate() {
+                    let mut line = row()
+                        .w_full()
+                        .items_start()
+                        .gap(14.0)
+                        .px(12.0)
+                        .py(9.0)
+                        .fill(if r == 0 { th.card } else { Color::TRANSPARENT });
+                    if r > 0 {
+                        line = line.border_sides([1.0, 0.0, 0.0, 0.0], th.border_soft);
+                    }
+                    for cell in row_ {
+                        line = line.child(para(cell, th).grow(1.0));
+                    }
+                    table = table.child(line);
+                }
+                out = out.child(table);
+            }
             Block::Quote(s) => {
                 out = out.child(
                     row()
@@ -208,4 +266,22 @@ pub fn blocks(blocks: &[Block], th: &Theme) -> El {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tokenizes_dollar_math() {
+        let toks = tokenize("For $f(n) = 100n$ and $n \\to \\infty$ we do.");
+        let math: Vec<String> = toks
+            .into_iter()
+            .filter_map(|t| match t {
+                Tok::Math(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(math.len(), 2, "{math:?}");
+    }
 }

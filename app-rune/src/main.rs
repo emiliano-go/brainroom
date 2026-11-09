@@ -32,6 +32,31 @@ fn scene_problem(s: &mut views::State) {
     s.demo_problem();
 }
 
+fn scene_math(s: &mut views::State) {
+    s.view = views::View::Session;
+    s.chat = Some(data::Chat {
+        id: "demo".to_owned(),
+        title: "Math".to_owned(),
+        kind: "teaching".to_owned(),
+        rows: vec![data::Row::Assistant(vec![
+            data::Block::Para(
+                "For $f(n) = 100n + 5$, as $n \\to \\infty$ the term $100n$ dominates.".to_owned(),
+            ),
+            data::Block::Numbered(vec![
+                (1, "First step with $x^2$.".to_owned()),
+                (2, "Second **bold** step.".to_owned()),
+            ]),
+            data::Block::Table(vec![
+                vec!["Notation".to_owned(), "Meaning".to_owned()],
+                vec!["$O(n)$".to_owned(), "at most".to_owned()],
+                vec!["$\\Theta(n)$".to_owned(), "exactly".to_owned()],
+            ]),
+            data::Block::Display("\\Theta(n^2)".to_owned()),
+        ])],
+        plan: None,
+    });
+}
+
 fn scene_streaming(s: &mut views::State) {
     s.open_first();
     s.busy = true;
@@ -48,6 +73,7 @@ fn main() {
             ("session", scene_session),
             ("settings", scene_settings),
             ("streaming", scene_streaming),
+            ("math", scene_math),
             ("quiz", scene_quiz),
             ("problem", scene_problem),
         ],

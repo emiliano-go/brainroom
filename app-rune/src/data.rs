@@ -13,6 +13,8 @@ pub enum Block {
     Display(String),
     Code(String),
     Bullet(Vec<String>),
+    Numbered(Vec<(u32, String)>),
+    Table(Vec<Vec<String>>),
     Quote(String),
     Rule,
 }
@@ -186,7 +188,7 @@ pub fn effort() -> String {
                 .and_then(Value::as_str)
                 .map(str::to_owned)
         })
-        .unwrap_or_else(|| "max".to_owned())
+        .unwrap_or_else(|| "medium".to_owned())
 }
 
 pub fn set_effort(level: &str) -> bool {
@@ -337,10 +339,79 @@ pub fn parse_markdown(text: &str) -> Vec<Block> {
             blocks.push(Block::Bullet(items));
             continue;
         }
+        if let Some((n, first)) = numbered_item(tr) {
+            flush(&mut para, &mut blocks);
+            let mut items = vec![(n, first.to_owned())];
+            while let Some(line) = lines.peek() {
+                if let Some((n, item)) = numbered_item(line.trim()) {
+                    items.push((n, item.to_owned()));
+                    lines.next();
+                } else {
+                    break;
+                }
+            }
+            blocks.push(Block::Numbered(items));
+            continue;
+        }
+        if is_table_row(tr) {
+            flush(&mut para, &mut blocks);
+            let mut rows = Vec::new();
+            rows.push(table_cells(tr));
+            let mut seen_separator = false;
+            while let Some(n) = lines.peek() {
+                let n = n.trim();
+                if !is_table_row(n) {
+                    break;
+                }
+                lines.next();
+                if !seen_separator && is_table_separator(n) {
+                    seen_separator = true;
+                    continue;
+                }
+                rows.push(table_cells(n));
+            }
+            if rows.len() >= 2 {
+                blocks.push(Block::Table(rows));
+            } else if let Some(row) = rows.into_iter().next() {
+                blocks.push(Block::Para(row.join(" | ")));
+            }
+            continue;
+        }
         para.push(tr);
     }
     flush(&mut para, &mut blocks);
     blocks
+}
+
+fn numbered_item(line: &str) -> Option<(u32, &str)> {
+    let rest = line.trim_start();
+    let dot = rest.find('.')?;
+    if dot == 0 {
+        return None;
+    }
+    let n: u32 = rest[..dot].parse().ok()?;
+    rest.get(dot + 1..)
+        .map(str::trim_start)
+        .filter(|s| !s.is_empty())
+        .map(|s| (n, s))
+}
+
+fn is_table_row(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with('|') && t.ends_with('|') && t.len() > 2
+}
+
+fn is_table_separator(line: &str) -> bool {
+    let t = line.trim();
+    t.starts_with('|') && t.ends_with('|') && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
+}
+
+fn table_cells(line: &str) -> Vec<String> {
+    line.trim()
+        .trim_matches('|')
+        .split('|')
+        .map(|cell| cell.trim().to_owned())
+        .collect()
 }
 
 fn content_parts(value: &Value) -> Vec<(String, Value)> {
@@ -423,6 +494,16 @@ pub fn blocks_text(blocks: &[Block]) -> String {
             Block::Display(tex) => format!("$${tex}$$"),
             Block::Code(s) => s.clone(),
             Block::Bullet(items) => items.join("\n"),
+            Block::Numbered(items) => items
+                .iter()
+                .map(|(n, item)| format!("{n}. {item}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Block::Table(rows) => rows
+                .iter()
+                .map(|row| format!("| {} |", row.join(" | ")))
+                .collect::<Vec<_>>()
+                .join("\n"),
             Block::Rule => continue,
         };
         if !out.is_empty() {
@@ -778,6 +859,17 @@ pub fn load_graph(store: &Store) -> Graph {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markdown_parses_numbered_lists_and_tables() {
+        let blocks = parse_markdown("1. one\n2. two\n\n| A | B |\n|---|---|\n| 1 | 2 |\n");
+        assert!(
+            matches!(&blocks[0], Block::Numbered(items) if items.len() == 2 && items[1].0 == 2)
+        );
+        assert!(
+            matches!(&blocks[1], Block::Table(rows) if rows.len() == 2 && rows[0] == ["A", "B"])
+        );
+    }
 
     #[test]
     fn plan_keeps_full_labels_and_layers() {

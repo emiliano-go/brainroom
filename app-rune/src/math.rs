@@ -100,3 +100,33 @@ pub fn square(image: &MathImage) -> Pixels {
     pixels.set(side, side, buf);
     pixels
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn renders_common_formulas() {
+        for tex in [
+            r"f(n) = 100n + 5",
+            r"\Theta(n^2)",
+            r"n \to \infty",
+            r"\Omega(n)",
+        ] {
+            assert!(
+                render(
+                    tex,
+                    false,
+                    32.0,
+                    rune::Color {
+                        r: 1.0,
+                        g: 1.0,
+                        b: 1.0,
+                        a: 1.0
+                    }
+                )
+                .is_some(),
+                "{tex}"
+            );
+        }
+    }
+}
