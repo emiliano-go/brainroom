@@ -30,6 +30,7 @@ pub struct State {
     pub topic: TextEdit,
     pub thinking: TextEdit,
     pub reading: TextEdit,
+    pub text_answer: TextEdit,
     pub quiz_open: bool,
     pub practice_answer: TextEdit,
     pub quiz_selected: Vec<usize>,
@@ -104,6 +105,7 @@ impl State {
             topic: TextEdit::new(""),
             thinking: TextEdit::new(""),
             reading: TextEdit::new(""),
+            text_answer: TextEdit::new(""),
             quiz_open: false,
             practice_answer: TextEdit::new(""),
             quiz_selected: Vec::new(),
@@ -169,6 +171,7 @@ impl State {
         self.active_id = Some(id.to_owned());
         self.thinking = TextEdit::new("");
         self.reading = TextEdit::new("");
+        self.text_answer = TextEdit::new("");
         self.reply = TextEdit::new("");
         self.quiz_selected.clear();
         self.quiz_open = false;
@@ -369,7 +372,14 @@ impl State {
             history.pop();
         }
         let practice = self.chat.as_ref().is_some_and(|c| c.kind == "practice");
-        let agent = ai::start(history, practice);
+        let mode = if practice {
+            brainroom_agent::Mode::Practice
+        } else if data::session_phase(&id) == "probe" {
+            brainroom_agent::Mode::Prober
+        } else {
+            brainroom_agent::Mode::Teach
+        };
+        let agent = ai::start(history, mode);
         let _ = agent.inbox.send(brainroom_agent::Input::User(text));
         self.agent = Some(agent);
     }
@@ -453,6 +463,11 @@ impl State {
                     correct,
                     multi_select,
                     graded,
+                    text_mode,
+                    question_type,
+                    node_id,
+                    details,
+                    committed,
                     ..
                 } => {
                     if let Some(chat) = &mut self.chat {
@@ -463,11 +478,17 @@ impl State {
                             correct: correct.clone(),
                             multi_select,
                             graded,
+                            text_mode,
+                            question_type: question_type.clone(),
+                            node_id: node_id.clone(),
+                            details: details.clone(),
+                            committed: committed.clone(),
                             tool: tool.clone(),
                             answered: None,
                             call_id: Some(call_id.clone()),
                         }));
                     }
+                    self.text_answer = TextEdit::new("");
                     self.pending_call = Some(call_id);
                     self.pending_problem = false;
                     self.busy = false;
@@ -566,6 +587,11 @@ impl State {
                 correct: vec![1],
                 multi_select: false,
                 graded: true,
+                text_mode: false,
+                question_type: Some("check".to_owned()),
+                node_id: None,
+                details: None,
+                committed: None,
                 tool: "quiz".to_owned(),
                 answered: None,
                 call_id: Some("demo-quiz".to_owned()),
@@ -633,16 +659,25 @@ impl State {
         let quiz_call = quiz.call_id.clone();
         let tool = quiz.tool.clone();
         let graded = quiz.graded;
-        let dont_know = self.quiz_selected.contains(&usize::MAX);
-        let mut chosen: Vec<usize> = self
-            .quiz_selected
-            .iter()
-            .copied()
-            .filter(|i| *i < quiz.options.len())
-            .collect();
+        let text_mode = quiz.text_mode;
+        let text_answer = if text_mode {
+            self.text_answer.text.trim().to_owned()
+        } else {
+            String::new()
+        };
+        let dont_know = !text_mode && self.quiz_selected.contains(&usize::MAX);
+        let mut chosen: Vec<usize> = if text_mode {
+            Vec::new()
+        } else {
+            self.quiz_selected
+                .iter()
+                .copied()
+                .filter(|i| *i < quiz.options.len())
+                .collect()
+        };
         chosen.sort_unstable();
         chosen.dedup();
-        let correct = if graded && !dont_know {
+        let correct = if graded && !dont_know && !text_mode {
             let expected = {
                 let mut expected = quiz.correct.clone();
                 expected.sort_unstable();
@@ -655,7 +690,11 @@ impl State {
         quiz.answered = Some(Answered {
             chosen: chosen.clone(),
             dont_know,
-            correct: if graded { Some(correct) } else { None },
+            correct: if graded && !text_mode {
+                Some(correct)
+            } else {
+                None
+            },
         });
         let answers: Vec<serde_json::Value> = chosen
             .iter()
@@ -667,7 +706,9 @@ impl State {
                 })
             })
             .collect();
-        let answer_text = if dont_know {
+        let answer_text = if text_mode {
+            text_answer.clone()
+        } else if dont_know {
             "I don't know".to_owned()
         } else {
             chosen
@@ -676,7 +717,7 @@ impl State {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        let confidence = if graded && !dont_know {
+        let confidence = if graded && !dont_know && !text_mode {
             Some((self.confidence * 100.0).round() as i32)
         } else {
             None
@@ -684,20 +725,32 @@ impl State {
         let thinking = self.thinking.text.trim().to_owned();
         let reading = self.reading.text.trim().to_owned();
         self.thinking = TextEdit::new("");
+        self.text_answer = TextEdit::new("");
         self.quiz_selected.clear();
         self.quiz_open = false;
+        let kind = if text_mode {
+            if tool == "ask_user_question" {
+                "ask"
+            } else {
+                "explain"
+            }
+        } else if graded {
+            "quiz"
+        } else {
+            "ask"
+        };
         let mut compact = serde_json::Map::new();
-        compact.insert(
-            "kind".to_owned(),
-            serde_json::json!(if graded { "quiz" } else { "ask" }),
-        );
+        compact.insert("kind".to_owned(), serde_json::json!(kind));
         if dont_know {
             compact.insert("dontKnow".to_owned(), serde_json::json!(true));
         }
         if !answers.is_empty() {
             compact.insert("answers".to_owned(), serde_json::json!(answers.clone()));
         }
-        if graded && !dont_know {
+        if text_mode && !text_answer.is_empty() {
+            compact.insert("text".to_owned(), serde_json::json!(text_answer.clone()));
+        }
+        if graded && !dont_know && !text_mode {
             compact.insert("correct".to_owned(), serde_json::json!(correct));
         }
         if let Some(confidence) = confidence {
@@ -714,12 +767,21 @@ impl State {
         }
         let compact = serde_json::Value::Object(compact);
         let mut details = serde_json::Map::new();
-        details.insert(
-            "kind".to_owned(),
-            serde_json::json!(if graded { "quiz" } else { "ask" }),
-        );
+        details.insert("kind".to_owned(), serde_json::json!(kind));
         details.insert("tool".to_owned(), serde_json::json!(tool));
         details.insert("questionText".to_owned(), serde_json::json!(quiz.question));
+        if let Some(question_type) = &quiz.question_type {
+            details.insert("questionType".to_owned(), serde_json::json!(question_type));
+        }
+        if let Some(node_id) = &quiz.node_id {
+            details.insert("nodeId".to_owned(), serde_json::json!(node_id));
+        }
+        if let Some(committed) = &quiz.committed {
+            details.insert("committed".to_owned(), serde_json::json!(committed));
+        }
+        if let Some(extra) = &quiz.details {
+            details.insert("details".to_owned(), serde_json::json!(extra));
+        }
         details.insert(
             "options".to_owned(),
             serde_json::json!(
@@ -738,6 +800,9 @@ impl State {
         );
         details.insert("dontKnow".to_owned(), serde_json::json!(dont_know));
         details.insert("answers".to_owned(), serde_json::json!(answers));
+        if text_mode && !text_answer.is_empty() {
+            details.insert("text".to_owned(), serde_json::json!(text_answer.clone()));
+        }
         if !thinking.is_empty() {
             details.insert("thinking".to_owned(), serde_json::json!(thinking.clone()));
         }
@@ -750,7 +815,7 @@ impl State {
         if let Some(confidence) = confidence {
             details.insert("confidence".to_owned(), serde_json::json!(confidence));
         }
-        if graded {
+        if graded && !text_mode {
             details.insert("correct".to_owned(), serde_json::json!(correct));
             details.insert(
                 "correctIndices".to_owned(),
@@ -779,7 +844,9 @@ impl State {
                 self.busy = true;
             }
         } else {
-            let mut message = if dont_know {
+            let mut message = if text_mode {
+                format!("My answer: {answer_text}.")
+            } else if dont_know {
                 "I don't know.".to_owned()
             } else {
                 format!("My answer: {answer_text}.")
@@ -2502,11 +2569,44 @@ fn quiz_card(quiz: &data::Quiz, live: bool, s: &State, th: &Theme) -> El {
         .fill(Color { a: 0.35, ..th.card })
         .border(1.0, th.border)
         .child(
-            text(if quiz.graded { "CHECK" } else { "ASK" }.to_owned())
-                .font(mono(10.0, 500.0))
-                .color(th.muted),
+            text(
+                if quiz.text_mode {
+                    if quiz.tool == "ask_user_question" {
+                        "ASK"
+                    } else {
+                        "EXPLAIN"
+                    }
+                } else if quiz.graded {
+                    "CHECK"
+                } else {
+                    "ASK"
+                }
+                .to_owned(),
+            )
+            .font(mono(10.0, 500.0))
+            .color(th.muted),
         )
-        .child(md::para(&quiz.question, th));
+        .child(md::para(&quiz.question, th))
+        .child(if let Some(details) = &quiz.details {
+            md::para(details, th)
+        } else {
+            el()
+        });
+
+    if quiz.text_mode {
+        card = card.child(
+            text_input(&s.text_answer, prose())
+                .key("quiz-text")
+                .min_h(78.0)
+                .padding(10.0)
+                .placeholder("Answer in your own words…", th.faint)
+                .color(th.fg)
+                .fill(Color::TRANSPARENT)
+                .border(1.0, th.border_soft)
+                .radius(8.0)
+                .on_edit(|s: &mut State| &mut s.text_answer),
+        );
+    }
 
     for (i, option) in quiz.options.iter().enumerate() {
         let chosen = if live {
@@ -2596,7 +2696,7 @@ fn quiz_card(quiz: &data::Quiz, live: bool, s: &State, th: &Theme) -> El {
     }
 
     // "I don't know"
-    let unknown_selected = live && s.quiz_selected.contains(&usize::MAX);
+    let unknown_selected = live && !quiz.text_mode && s.quiz_selected.contains(&usize::MAX);
     let mut unknown_row = row()
         .w_full()
         .gap(10.0)
@@ -2624,7 +2724,7 @@ fn quiz_card(quiz: &data::Quiz, live: bool, s: &State, th: &Theme) -> El {
                 .color(th.muted)
                 .grow(1.0),
         );
-    if live {
+    if live && !quiz.text_mode {
         unknown_row = unknown_row
             .key("option-unknown")
             .hover(th.hover)
@@ -2633,12 +2733,14 @@ fn quiz_card(quiz: &data::Quiz, live: bool, s: &State, th: &Theme) -> El {
                 s.quiz_selected = vec![usize::MAX];
             });
     }
-    card = card.child(unknown_row);
+    if !quiz.text_mode {
+        card = card.child(unknown_row);
+    }
 
     // confidence (graded quizzes only)
     let pct = (s.confidence * 100.0).round() as i32;
     let track_w = 540.0;
-    if quiz.graded {
+    if quiz.graded && !quiz.text_mode {
         card = card.child(
             row()
                 .w_full()
@@ -2700,7 +2802,11 @@ fn quiz_card(quiz: &data::Quiz, live: bool, s: &State, th: &Theme) -> El {
             ),
     );
 
-    let ready = !s.quiz_selected.is_empty();
+    let ready = if quiz.text_mode {
+        !s.text_answer.text.trim().is_empty()
+    } else {
+        !s.quiz_selected.is_empty()
+    };
     let submit = el()
         .key("submit-answer")
         .h(32.0)
@@ -3678,6 +3784,11 @@ mod tests {
                 correct: vec![0, 2],
                 multi_select: true,
                 graded: true,
+                text_mode: false,
+                question_type: Some("check".to_owned()),
+                node_id: Some("n1".to_owned()),
+                details: None,
+                committed: None,
                 explanation: None,
             })
             .unwrap();
@@ -3695,6 +3806,59 @@ mod tests {
                 assert_eq!(value["answers"].as_array().unwrap().len(), 2);
                 assert_eq!(value["answers"][0]["index"], 1);
                 assert_eq!(value["answers"][1]["index"], 3);
+            }
+            other => panic!("expected tool result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explain_answers_send_text_without_client_grading() {
+        let mut state = State::new();
+        state.active_id = Some("missing_test_chat".to_owned());
+        state.chat = Some(Chat {
+            id: "missing_test_chat".to_owned(),
+            title: "test".to_owned(),
+            kind: "teaching".to_owned(),
+            rows: vec![Row::User("start".to_owned())],
+            plan: None,
+        });
+        let (inbox, inputs) = channel();
+        let (events, event_rx) = channel();
+        state.agent = Some(ai::AgentHandle {
+            inbox,
+            events: event_rx,
+        });
+        events
+            .send(brainroom_agent::Event::Quiz {
+                call_id: "exp-1".to_owned(),
+                tool: "explain".to_owned(),
+                question: "Explain X.".to_owned(),
+                options: Vec::new(),
+                values: Vec::new(),
+                correct: Vec::new(),
+                multi_select: false,
+                graded: true,
+                text_mode: true,
+                question_type: Some("check".to_owned()),
+                node_id: Some("n1".to_owned()),
+                details: None,
+                committed: Some("Because Y.".to_owned()),
+                explanation: None,
+            })
+            .unwrap();
+        assert!(state.poll());
+        state.text_answer = TextEdit::new("My own words");
+        state.submit_quiz();
+        let input = inputs
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        match input {
+            brainroom_agent::Input::ToolResult { call_id, content } => {
+                assert_eq!(call_id, "exp-1");
+                let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+                assert_eq!(value["kind"], "explain");
+                assert_eq!(value["text"], "My own words");
+                assert!(value.get("correct").is_none());
             }
             other => panic!("expected tool result, got {other:?}"),
         }
@@ -3727,6 +3891,11 @@ mod tests {
                 correct: Vec::new(),
                 multi_select: false,
                 graded: false,
+                text_mode: false,
+                question_type: None,
+                node_id: None,
+                details: None,
+                committed: None,
                 explanation: None,
             })
             .unwrap();
@@ -3789,6 +3958,11 @@ mod tests {
                 correct: vec![1],
                 multi_select: false,
                 graded: true,
+                text_mode: false,
+                question_type: None,
+                node_id: None,
+                details: None,
+                committed: None,
                 explanation: None,
             })
             .unwrap();

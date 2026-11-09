@@ -27,6 +27,11 @@ pub struct Quiz {
     pub correct: Vec<usize>,
     pub multi_select: bool,
     pub graded: bool,
+    pub text_mode: bool,
+    pub question_type: Option<String>,
+    pub node_id: Option<String>,
+    pub details: Option<String>,
+    pub committed: Option<String>,
     pub tool: String,
     pub answered: Option<Answered>,
     pub call_id: Option<String>,
@@ -479,6 +484,7 @@ fn content_parts(value: &Value) -> Vec<(String, Value)> {
 
 fn quiz_from_call(call: &Value, graded: bool, tool: &str) -> Option<Quiz> {
     let args = call.get("arguments")?;
+    let text_tool = matches!(tool, "ask_user_question" | "explain" | "recall");
     let question = args
         .get("question")
         .and_then(Value::as_str)
@@ -509,7 +515,7 @@ fn quiz_from_call(call: &Value, graded: bool, tool: &str) -> Option<Quiz> {
             values.push(value);
         }
     }
-    if options.is_empty() {
+    if options.is_empty() && !text_tool {
         return None;
     }
     let wanted: Vec<String> = match args.get("correctAnswer") {
@@ -538,6 +544,7 @@ fn quiz_from_call(call: &Value, graded: bool, tool: &str) -> Option<Quiz> {
         .get("multiSelect")
         .and_then(Value::as_bool)
         .unwrap_or(correct.len() > 1);
+    let text_mode = options.is_empty() && text_tool;
     Some(Quiz {
         question,
         options,
@@ -545,6 +552,21 @@ fn quiz_from_call(call: &Value, graded: bool, tool: &str) -> Option<Quiz> {
         correct,
         multi_select,
         graded,
+        text_mode,
+        question_type: args.get("type").and_then(Value::as_str).map(str::to_owned),
+        node_id: args
+            .get("nodeId")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        details: args
+            .get("details")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        committed: args
+            .get("correctAnswer")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .filter(|text| !text.trim().is_empty()),
         tool: tool.to_owned(),
         answered: None,
         call_id: call.get("id").and_then(Value::as_str).map(str::to_owned),
@@ -708,6 +730,57 @@ pub fn parse_plan(src: &str) -> Plan {
     }
 }
 
+/// Mirror LearnHarness's phase seam: probe until a clean probe_done result;
+/// later sessions are teacher sessions (plan/teach share the teacher agent).
+pub fn session_phase(id: &str) -> &'static str {
+    let Some(record) = store().load_chat(id) else {
+        return "probe";
+    };
+    if record.kind.as_deref() == Some("practice") {
+        return "practice";
+    }
+    let mut probe_done = false;
+    let mut plan = false;
+    for message in &record.messages {
+        let role = message.get("role").and_then(Value::as_str).unwrap_or("");
+        if role == "toolResult" {
+            if message.get("toolName").and_then(Value::as_str) == Some("probe_done")
+                && message.get("isError").and_then(Value::as_bool) != Some(true)
+            {
+                probe_done = true;
+            }
+            continue;
+        }
+        if role != "assistant" {
+            continue;
+        }
+        if let Some(parts) = message.get("content").and_then(Value::as_array) {
+            for part in parts {
+                if part.get("type").and_then(Value::as_str) != Some("toolCall") {
+                    continue;
+                }
+                let name = part.get("name").and_then(Value::as_str).unwrap_or("");
+                if name == "plan_init" {
+                    plan = true;
+                }
+                let node = part
+                    .get("arguments")
+                    .and_then(|a| a.get("nodeId"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if (name == "quiz" || name == "explain") && !node.is_empty() {
+                    plan = true;
+                }
+            }
+        }
+    }
+    if probe_done || plan {
+        "teacher"
+    } else {
+        "probe"
+    }
+}
+
 pub fn latest_usage(store: &Store, id: &str) -> (u64, f64) {
     let Some(record) = store.load_chat(id) else {
         return (0, 0.0);
@@ -778,7 +851,11 @@ pub fn load_chat(store: &Store, id: &str) -> Option<Chat> {
                     {
                         plan = Some(parse_plan(mermaid));
                     }
-                    if (name == "quiz" || name == "probe" || name == "ask_user_question")
+                    if (name == "quiz"
+                        || name == "probe"
+                        || name == "explain"
+                        || name == "recall"
+                        || name == "ask_user_question")
                         && let Some(quiz) = quiz_from_call(&part, name != "ask_user_question", name)
                     {
                         rows.push(Row::Quiz(quiz));
@@ -1090,6 +1167,11 @@ mod tests {
             correct: Vec::new(),
             multi_select: false,
             graded: false,
+            text_mode: false,
+            question_type: None,
+            node_id: None,
+            details: None,
+            committed: None,
             tool: "ask_user_question".to_owned(),
             answered: None,
             call_id: Some("ask-1".to_owned()),

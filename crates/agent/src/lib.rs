@@ -67,6 +67,11 @@ pub enum Event {
         correct: Vec<usize>,
         multi_select: bool,
         graded: bool,
+        text_mode: bool,
+        question_type: Option<String>,
+        node_id: Option<String>,
+        details: Option<String>,
+        committed: Option<String>,
         explanation: Option<String>,
     },
     Plan {
@@ -109,6 +114,7 @@ pub trait Completer: Send {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mode {
+    Prober,
     Teach,
     Practice,
 }
@@ -119,6 +125,7 @@ pub fn tools() -> Vec<ToolSpec> {
 
 pub fn tools_for(mode: Mode) -> Vec<ToolSpec> {
     match mode {
+        Mode::Prober => prober_tools(),
         Mode::Teach => teach_tools(),
         Mode::Practice => practice_tools(),
     }
@@ -145,6 +152,8 @@ fn teach_tools() -> Vec<ToolSpec> {
                             "required": ["label"]
                         }
                     },
+                    "type": { "type": "string", "enum": ["check", "predict"], "description": "The question's role in the teaching cycle." },
+                    "nodeId": { "type": "string", "description": "REQUIRED plan-tree node slug this question is about." },
                     "correctAnswer": {
                         "description": "The value (or label) of the correct option, or an array for multi-select.",
                         "type": ["string", "array"],
@@ -152,7 +161,7 @@ fn teach_tools() -> Vec<ToolSpec> {
                     },
                     "multiSelect": { "type": "boolean" }
                 },
-                "required": ["question", "options", "correctAnswer"]
+                "required": ["type", "nodeId", "question", "options", "correctAnswer"]
             }),
         },
         ToolSpec {
@@ -162,6 +171,7 @@ fn teach_tools() -> Vec<ToolSpec> {
                 "type": "object",
                 "properties": {
                     "question": { "type": "string" },
+                    "details": { "type": "string" },
                     "options": {
                         "type": "array",
                         "items": {
@@ -175,7 +185,22 @@ fn teach_tools() -> Vec<ToolSpec> {
                         }
                     }
                 },
-                "required": ["question", "options"]
+                "required": ["question"]
+            }),
+        },
+        ToolSpec {
+            name: "explain",
+            description: "Ask one GRADED free-text question about a plan node. Commit the full correct answer in correctAnswer BEFORE posing; grade the reply against it next turn. ONE question per turn.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "type": { "type": "string", "enum": ["check", "predict"] },
+                    "nodeId": { "type": "string", "description": "REQUIRED plan-tree node slug this question is about." },
+                    "question": { "type": "string" },
+                    "correctAnswer": { "type": "string" },
+                    "details": { "type": "string" }
+                },
+                "required": ["type", "nodeId", "question", "correctAnswer"]
             }),
         },
         ToolSpec {
@@ -208,6 +233,100 @@ fn teach_tools() -> Vec<ToolSpec> {
                 "properties": { "text": { "type": "string" } },
                 "required": ["text"]
             }),
+        },
+    ]
+}
+
+fn prober_tools() -> Vec<ToolSpec> {
+    vec![
+        ToolSpec {
+            name: "probe",
+            description: "Ask one GRADED multiple-choice probe question, then end your turn. Probe calls have no type or nodeId. Supply correctAnswer as the correct option value (or label).",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "question": { "type": "string" },
+                    "options": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": { "label": { "type": "string" }, "value": { "type": "string" } },
+                            "required": ["label"]
+                        }
+                    },
+                    "correctAnswer": { "type": ["string", "array"], "items": { "type": "string" } },
+                    "multiSelect": { "type": "boolean" },
+                    "explanation": { "type": "string" }
+                },
+                "required": ["question", "options", "correctAnswer"]
+            }),
+        },
+        ToolSpec {
+            name: "recall",
+            description: "Ask one GRADED free-text recall question. Commit the full correct answer in correctAnswer BEFORE posing. ONE question per turn.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "question": { "type": "string" },
+                    "correctAnswer": { "type": "string" },
+                    "details": { "type": "string" }
+                },
+                "required": ["question", "correctAnswer"]
+            }),
+        },
+        ToolSpec {
+            name: "ask_user_question",
+            description: "Ask one UNGRADED question to collect a preference or decision.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "question": { "type": "string" },
+                    "details": { "type": "string" },
+                    "options": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": { "label": { "type": "string" }, "value": { "type": "string" }, "description": { "type": "string" } },
+                            "required": ["label"]
+                        }
+                    }
+                },
+                "required": ["question"]
+            }),
+        },
+        ToolSpec {
+            name: "probe_done",
+            description: "Conclude the probe phase with one entry per strand. Exactly one call; refused while a question is open.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "strands": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string" },
+                                "floor": { "type": "string" },
+                                "ceiling": { "type": "string" },
+                                "misconceptions": { "type": "string" },
+                                "buildFrom": { "type": "string" }
+                            },
+                            "required": ["name", "floor", "ceiling"]
+                        }
+                    }
+                },
+                "required": ["strands"]
+            }),
+        },
+        ToolSpec {
+            name: "list_sessions",
+            description: "List the learner's previous sessions.",
+            parameters: json!({ "type": "object", "properties": {} }),
+        },
+        ToolSpec {
+            name: "list_propositions",
+            description: "List propositions in the learner's knowledge graph.",
+            parameters: json!({ "type": "object", "properties": { "session": { "type": "string" } } }),
         },
     ]
 }
@@ -337,6 +456,7 @@ fn emit_tool_result(
 
 fn system_message(mode: Mode, data_dir: &Path) -> Message {
     let kind = match mode {
+        Mode::Prober => prompts::AgentKind::Prober,
         Mode::Teach => prompts::AgentKind::Teacher,
         Mode::Practice => prompts::AgentKind::Practice,
     };
@@ -457,6 +577,60 @@ fn list_propositions(data_dir: &Path) -> String {
     serde_json::to_string(&nodes).unwrap_or_else(|_| "[]".to_owned())
 }
 
+fn mermaid_node_ids(mermaid: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    for line in mermaid.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("graph") || line.starts_with("flowchart") {
+            continue;
+        }
+        for segment in line.split("-->") {
+            let segment = segment.trim();
+            if segment.is_empty() {
+                continue;
+            }
+            let id = match segment.find('[') {
+                Some(pos) => segment[..pos].trim(),
+                None => segment.split_whitespace().next().unwrap_or(""),
+            };
+            if !id.is_empty()
+                && id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_'))
+                && !ids.iter().any(|existing| existing == id)
+            {
+                ids.push(id.to_owned());
+            }
+        }
+    }
+    ids
+}
+
+fn existing_plan_nodes(messages: &[Message]) -> std::collections::HashSet<String> {
+    let mut nodes = std::collections::HashSet::new();
+    for message in messages {
+        let Some(calls) = message.get("tool_calls").and_then(Value::as_array) else {
+            continue;
+        };
+        for call in calls {
+            if call.pointer("/function/name").and_then(Value::as_str) != Some("plan_init") {
+                continue;
+            }
+            let raw = call
+                .pointer("/function/arguments")
+                .and_then(Value::as_str)
+                .unwrap_or("{}");
+            let Ok(arguments) = serde_json::from_str::<Value>(raw) else {
+                continue;
+            };
+            if let Some(mermaid) = arguments.get("mermaid").and_then(Value::as_str) {
+                nodes.extend(mermaid_node_ids(mermaid));
+            }
+        }
+    }
+    nodes
+}
+
 /// Run the agent until its inbox closes. Blocking tools (`quiz`, `ask_user_question`)
 /// emit an event and wait for the matching [`Input::ToolResult`].
 pub fn run(
@@ -479,6 +653,7 @@ pub fn run_with_mode(
 ) {
     let mut problem_solution: Option<String> = None;
     let mut messages = vec![system_message(mode, &data_dir)];
+    let mut plan_nodes = existing_plan_nodes(&initial);
     messages.extend(initial);
     while let Ok(first) = inbox.recv() {
         match first {
@@ -514,6 +689,7 @@ pub fn run_with_mode(
                 break;
             }
             let mut blocking: Option<(String, String)> = None;
+            let mut question_posed = false;
             for call in &turn.tool_calls {
                 match call.name.as_str() {
                     "problem" => {
@@ -573,7 +749,43 @@ pub fn run_with_mode(
                             0,
                         );
                     }
-                    "quiz" | "probe" | "ask_user_question" => {
+                    "quiz" | "probe" | "explain" | "recall" | "ask_user_question" => {
+                        let node_id = call
+                            .arguments
+                            .get("nodeId")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .trim()
+                            .to_owned();
+                        if matches!(call.name.as_str(), "quiz" | "explain") {
+                            if node_id.is_empty() {
+                                let content = "nodeId is required for teacher quiz/explain calls — copy an exact plan_init slug.".to_owned();
+                                messages.push(tool_result(&call.id, &content));
+                                emit_tool_result(
+                                    &emit, &call.id, &call.name, content, None, true, 0,
+                                );
+                                continue;
+                            }
+                            if !plan_nodes.contains(&node_id) {
+                                let content = format!(
+                                    "nodeId \"{node_id}\" is not in this session's plan — use an exact plan_init slug."
+                                );
+                                messages.push(tool_result(&call.id, &content));
+                                emit_tool_result(
+                                    &emit, &call.id, &call.name, content, None, true, 0,
+                                );
+                                continue;
+                            }
+                        }
+                        if question_posed {
+                            let content =
+                                "Only one question may be posed per turn; this call was not shown."
+                                    .to_owned();
+                            messages.push(tool_result(&call.id, &content));
+                            emit_tool_result(&emit, &call.id, &call.name, content, None, true, 0);
+                            continue;
+                        }
+                        question_posed = true;
                         let question = quiz_question(call);
                         let (options, values) = quiz_options(call);
                         let correct = quiz_correct(call, &options, &values);
@@ -587,15 +799,37 @@ pub fn run_with_mode(
                             .get("explanation")
                             .and_then(Value::as_str)
                             .map(str::to_owned);
+                        let text_mode = matches!(call.name.as_str(), "explain" | "recall")
+                            || (call.name == "ask_user_question" && options.is_empty());
+                        let graded =
+                            matches!(call.name.as_str(), "quiz" | "probe" | "explain" | "recall");
                         let _ = emit.send(Event::Quiz {
                             call_id: call.id.clone(),
                             tool: call.name.clone(),
-                            graded: call.name != "ask_user_question",
+                            graded,
+                            text_mode,
                             question: question.clone(),
                             options,
                             values,
                             correct,
                             multi_select,
+                            question_type: call
+                                .arguments
+                                .get("type")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned),
+                            node_id: (!node_id.is_empty()).then_some(node_id),
+                            details: call
+                                .arguments
+                                .get("details")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned),
+                            committed: call
+                                .arguments
+                                .get("correctAnswer")
+                                .and_then(Value::as_str)
+                                .filter(|text| !text.trim().is_empty())
+                                .map(str::to_owned),
                             explanation,
                         });
                         blocking = Some((call.id.clone(), question));
@@ -607,6 +841,7 @@ pub fn run_with_mode(
                             .and_then(Value::as_str)
                             .unwrap_or_default()
                             .to_owned();
+                        plan_nodes.extend(mermaid_node_ids(&mermaid));
                         let _ = emit.send(Event::Plan { mermaid });
                         messages.push(tool_result(&call.id, "Plan recorded."));
                         emit_tool_result(
@@ -615,6 +850,24 @@ pub fn run_with_mode(
                             "plan_init",
                             "Plan recorded.".to_owned(),
                             None,
+                            false,
+                            0,
+                        );
+                    }
+                    "probe_done" => {
+                        let strands = call
+                            .arguments
+                            .get("strands")
+                            .cloned()
+                            .unwrap_or_else(|| json!([]));
+                        let content = json!({ "ok": true, "strands": strands }).to_string();
+                        messages.push(tool_result(&call.id, &content));
+                        emit_tool_result(
+                            &emit,
+                            &call.id,
+                            &call.name,
+                            content,
+                            Some(strands),
                             false,
                             0,
                         );
@@ -915,7 +1168,7 @@ mod tests {
             text: "Try this.".to_owned(),
             tool_calls: vec![ToolCall {
                 id: "call-1".to_owned(),
-                name: "quiz".to_owned(),
+                name: "probe".to_owned(),
                 arguments: json!({
                     "question": "What is 2+2?",
                     "options": [{ "label": "3" }, { "label": "4", "value": "four" }],
@@ -1054,6 +1307,72 @@ mod tests {
         assert_eq!(solution, "2x");
         assert!(matches!(recv_app(&out_rx), Event::Text(t) if t == "Next problem soon."));
         assert!(matches!(recv_app(&out_rx), Event::Done));
+    }
+
+    #[test]
+    fn prober_tools_are_distinct() {
+        let names: Vec<&str> = tools_for(Mode::Prober).iter().map(|t| t.name).collect();
+        for required in ["probe", "recall", "ask_user_question", "probe_done"] {
+            assert!(names.contains(&required), "missing {required}");
+        }
+        for teacher_only in ["quiz", "explain", "plan_init", "problem"] {
+            assert!(!names.contains(&teacher_only), "prober has {teacher_only}");
+        }
+    }
+
+    #[test]
+    fn mermaid_nodes_parse_chains() {
+        let ids = mermaid_node_ids("graph TD\n  a[Alpha] --> b[Beta]\n  c --> d[Delta]");
+        assert_eq!(ids, ["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn teacher_quiz_requires_a_known_plan_node() {
+        let quiz = AssistantTurn {
+            text: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "call-1".to_owned(),
+                name: "quiz".to_owned(),
+                arguments: json!({
+                    "type": "check",
+                    "nodeId": "missing",
+                    "question": "Q",
+                    "options": [{"label": "A"}, {"label": "B"}],
+                    "correctAnswer": "A"
+                }),
+            }],
+            usage: None,
+            ..Default::default()
+        };
+        let done = AssistantTurn {
+            text: "Retry.".to_owned(),
+            tool_calls: vec![],
+            usage: None,
+            ..Default::default()
+        };
+        let (fake, _) = Fake::new(vec![quiz, done]);
+        let (in_tx, in_rx) = mpsc::channel();
+        let (out_tx, out_rx) = mpsc::channel();
+        std::thread::spawn(move || run(&fake, PathBuf::from("/tmp"), Vec::new(), in_rx, out_tx));
+        in_tx.send(Input::User("teach".to_owned())).unwrap();
+        let mut error = false;
+        let mut posed = false;
+        loop {
+            match recv(&out_rx) {
+                Event::ToolResult {
+                    is_error, content, ..
+                } => {
+                    assert!(is_error);
+                    assert!(content.contains("not in this session's plan"));
+                    error = true;
+                }
+                Event::Quiz { .. } => posed = true,
+                Event::Done => break,
+                _ => {}
+            }
+        }
+        assert!(error);
+        assert!(!posed);
     }
 
     #[test]
