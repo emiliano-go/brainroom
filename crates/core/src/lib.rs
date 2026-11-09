@@ -134,9 +134,22 @@ impl UserSettings {
 /// RFC 3339 UTC timestamp, matching the JavaScript `toISOString()` shape
 /// used by LearnHarness chat records.
 pub fn now_iso() -> String {
-    time::OffsetDateTime::now_utc()
+    let raw = time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let Some(z) = raw.rfind('Z') else {
+        return raw;
+    };
+    let (body, _) = raw.split_at(z);
+    let (whole, fraction) = match body.find('.') {
+        Some(dot) => (&body[..dot], Some(&body[dot + 1..])),
+        None => (body, None),
+    };
+    let mut millis: String = fraction.unwrap_or_default().chars().take(3).collect();
+    while millis.len() < 3 {
+        millis.push('0');
+    }
+    format!("{whole}.{millis}Z")
 }
 
 pub fn now_millis() -> u64 {
@@ -144,4 +157,17 @@ pub fn now_millis() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn iso_timestamps_use_javascript_millisecond_shape() {
+        let now = now_iso();
+        assert_eq!(now.len(), 24, "{now}");
+        assert!(now.ends_with('Z'));
+        assert_eq!(now.as_bytes()[19], b'.');
+    }
 }

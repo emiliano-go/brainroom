@@ -43,8 +43,13 @@ pub enum Event {
     Text(String),
     Quiz {
         call_id: String,
+        tool: String,
         question: String,
         options: Vec<String>,
+        values: Vec<String>,
+        correct: Vec<usize>,
+        multi_select: bool,
+        graded: bool,
         explanation: Option<String>,
     },
     Plan {
@@ -97,7 +102,7 @@ fn teach_tools() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "quiz",
-            description: "Ask the learner one multiple-choice question and wait for their answer.",
+            description: "Ask one GRADED multiple-choice question. Supply correctAnswer as the correct option's value (or label), or an array for multiSelect. Include option values when labels are not unique. Call once, then end your turn.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -107,17 +112,26 @@ fn teach_tools() -> Vec<ToolSpec> {
                         "type": "array",
                         "items": {
                             "type": "object",
-                            "properties": { "label": { "type": "string" } },
+                            "properties": {
+                                "label": { "type": "string" },
+                                "value": { "type": "string" }
+                            },
                             "required": ["label"]
                         }
-                    }
+                    },
+                    "correctAnswer": {
+                        "description": "The value (or label) of the correct option, or an array for multi-select.",
+                        "type": ["string", "array"],
+                        "items": { "type": "string" }
+                    },
+                    "multiSelect": { "type": "boolean" }
                 },
-                "required": ["question", "options"]
+                "required": ["question", "options", "correctAnswer"]
             }),
         },
         ToolSpec {
             name: "ask_user_question",
-            description: "Ask the learner a focused setup question before teaching.",
+            description: "Ask one UNGRADED question to collect a preference or decision. There is no correct answer. Options are labels with optional values/descriptions. Call once, then end your turn.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -126,12 +140,16 @@ fn teach_tools() -> Vec<ToolSpec> {
                         "type": "array",
                         "items": {
                             "type": "object",
-                            "properties": { "label": { "type": "string" } },
+                            "properties": {
+                                "label": { "type": "string" },
+                                "value": { "type": "string" },
+                                "description": { "type": "string" }
+                            },
                             "required": ["label"]
                         }
                     }
                 },
-                "required": ["question"]
+                "required": ["question", "options"]
             }),
         },
         ToolSpec {
@@ -252,21 +270,56 @@ fn tool_result(call_id: &str, content: &str) -> Message {
     json!({ "role": "tool", "tool_call_id": call_id, "content": content })
 }
 
-fn quiz_options(call: &ToolCall) -> Vec<String> {
-    call.arguments
-        .get("options")
-        .and_then(Value::as_array)
-        .map(|opts| {
-            opts.iter()
-                .filter_map(|o| {
-                    o.get("label")
-                        .and_then(Value::as_str)
-                        .or_else(|| o.as_str())
-                        .map(str::to_owned)
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+fn quiz_options(call: &ToolCall) -> (Vec<String>, Vec<String>) {
+    let mut labels = Vec::new();
+    let mut values = Vec::new();
+    if let Some(opts) = call.arguments.get("options").and_then(Value::as_array) {
+        for option in opts {
+            let label = option
+                .get("label")
+                .and_then(Value::as_str)
+                .or_else(|| option.as_str())
+                .unwrap_or_default()
+                .trim()
+                .to_owned();
+            let value = option
+                .get("value")
+                .and_then(Value::as_str)
+                .map(|v| v.trim().to_owned())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| label.clone());
+            labels.push(label);
+            values.push(value);
+        }
+    }
+    (labels, values)
+}
+
+fn quiz_correct(call: &ToolCall, labels: &[String], values: &[String]) -> Vec<usize> {
+    let wanted: Vec<String> = match call.arguments.get("correctAnswer") {
+        Some(Value::String(answer)) => vec![answer.clone()],
+        Some(Value::Array(answers)) => answers
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    };
+    let mut out = Vec::new();
+    for answer in wanted {
+        let answer = answer.trim();
+        let index = values
+            .iter()
+            .position(|v| v == answer)
+            .or_else(|| labels.iter().position(|l| l == answer));
+        if let Some(index) = index
+            && !out.contains(&index)
+        {
+            out.push(index);
+        }
+    }
+    out.sort_unstable();
+    out
 }
 
 fn quiz_question(call: &ToolCall) -> String {
@@ -406,9 +459,15 @@ pub fn run_with_mode(
                         });
                         messages.push(tool_result(&call.id, "Recorded."));
                     }
-                    "quiz" | "ask_user_question" => {
+                    "quiz" | "probe" | "ask_user_question" => {
                         let question = quiz_question(call);
-                        let options = quiz_options(call);
+                        let (options, values) = quiz_options(call);
+                        let correct = quiz_correct(call, &options, &values);
+                        let multi_select = call
+                            .arguments
+                            .get("multiSelect")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(correct.len() > 1);
                         let explanation = call
                             .arguments
                             .get("explanation")
@@ -416,8 +475,13 @@ pub fn run_with_mode(
                             .map(str::to_owned);
                         let _ = emit.send(Event::Quiz {
                             call_id: call.id.clone(),
+                            tool: call.name.clone(),
+                            graded: call.name != "ask_user_question",
                             question: question.clone(),
                             options,
+                            values,
+                            correct,
+                            multi_select,
                             explanation,
                         });
                         blocking = Some((call.id.clone(), question));
@@ -628,7 +692,8 @@ mod tests {
                 name: "quiz".to_owned(),
                 arguments: json!({
                     "question": "What is 2+2?",
-                    "options": [{ "label": "3" }, { "label": "4" }]
+                    "options": [{ "label": "3" }, { "label": "4", "value": "four" }],
+                    "correctAnswer": "four"
                 }),
             }],
             usage: None,
@@ -649,6 +714,7 @@ mod tests {
             call_id,
             question,
             options,
+            correct,
             ..
         } = recv(&out_rx)
         else {
@@ -657,6 +723,7 @@ mod tests {
         assert_eq!(call_id, "call-1");
         assert_eq!(question, "What is 2+2?");
         assert_eq!(options, ["3", "4"]);
+        assert_eq!(correct, [1]);
 
         in_tx
             .send(Input::ToolResult {

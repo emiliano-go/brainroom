@@ -23,13 +23,19 @@ pub enum Block {
 pub struct Quiz {
     pub question: String,
     pub options: Vec<String>,
+    pub values: Vec<String>,
+    pub correct: Vec<usize>,
+    pub multi_select: bool,
+    pub graded: bool,
+    pub tool: String,
     pub answered: Option<Answered>,
     pub call_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct Answered {
-    pub chosen: Option<usize>,
+    pub chosen: Vec<usize>,
+    pub dont_know: bool,
     pub correct: Option<bool>,
 }
 
@@ -447,7 +453,7 @@ fn content_parts(value: &Value) -> Vec<(String, Value)> {
     out
 }
 
-fn quiz_from_call(call: &Value) -> Option<Quiz> {
+fn quiz_from_call(call: &Value, graded: bool, tool: &str) -> Option<Quiz> {
     let args = call.get("arguments")?;
     let question = args
         .get("question")
@@ -458,45 +464,112 @@ fn quiz_from_call(call: &Value) -> Option<Quiz> {
     if question.is_empty() {
         return None;
     }
-    let options: Vec<String> = args
-        .get("options")
-        .and_then(Value::as_array)
-        .map(|opts| {
-            opts.iter()
-                .filter_map(|o| o.get("label").and_then(Value::as_str).map(str::to_owned))
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut options = Vec::new();
+    let mut values = Vec::new();
+    if let Some(opts) = args.get("options").and_then(Value::as_array) {
+        for opt in opts {
+            let label = opt
+                .get("label")
+                .and_then(Value::as_str)
+                .or_else(|| opt.as_str())
+                .unwrap_or_default()
+                .trim()
+                .to_owned();
+            let value = opt
+                .get("value")
+                .and_then(Value::as_str)
+                .map(|v| v.trim().to_owned())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| label.clone());
+            options.push(label);
+            values.push(value);
+        }
+    }
     if options.is_empty() {
         return None;
     }
+    let wanted: Vec<String> = match args.get("correctAnswer") {
+        Some(Value::String(answer)) => vec![answer.clone()],
+        Some(Value::Array(answers)) => answers
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    };
+    let mut correct = Vec::new();
+    for answer in wanted {
+        let answer = answer.trim();
+        if let Some(index) = values
+            .iter()
+            .position(|v| v == answer)
+            .or_else(|| options.iter().position(|l| l == answer))
+            && !correct.contains(&index)
+        {
+            correct.push(index);
+        }
+    }
+    correct.sort_unstable();
+    let multi_select = args
+        .get("multiSelect")
+        .and_then(Value::as_bool)
+        .unwrap_or(correct.len() > 1);
     Some(Quiz {
         question,
         options,
+        values,
+        correct,
+        multi_select,
+        graded,
+        tool: tool.to_owned(),
         answered: None,
         call_id: call.get("id").and_then(Value::as_str).map(str::to_owned),
     })
 }
 
-fn apply_result(quiz: &mut Quiz, text: &str) {
-    let Ok(v) = serde_json::from_str::<Value>(text) else {
-        return;
+fn apply_result(quiz: &mut Quiz, text: &str, details: Option<&Value>) {
+    let fallback;
+    let v = match details {
+        Some(details) => details,
+        None => {
+            let Ok(parsed) = serde_json::from_str::<Value>(text) else {
+                return;
+            };
+            fallback = parsed;
+            &fallback
+        }
     };
-    let chosen = v
+    let mut chosen: Vec<usize> = v
         .get("answers")
         .and_then(Value::as_array)
-        .and_then(|a| a.first())
-        .and_then(|a| a.get("index"))
-        .and_then(Value::as_u64)
-        .map(|i| i as usize);
+        .map(|answers| {
+            answers
+                .iter()
+                .filter_map(|a| a.get("index").and_then(Value::as_u64))
+                .filter_map(|i| (i > 0).then_some((i - 1) as usize))
+                .collect()
+        })
+        .unwrap_or_default();
+    chosen.sort_unstable();
+    chosen.dedup();
+    let dont_know = v.get("dontKnow").and_then(Value::as_bool).unwrap_or(false);
     let correct = v.get("correct").and_then(Value::as_bool);
-    if v.get("dontKnow").and_then(Value::as_bool).unwrap_or(false) {
+    if let Some(indices) = v.get("correctIndices").and_then(Value::as_array) {
+        let indices: Vec<usize> = indices
+            .iter()
+            .filter_map(Value::as_u64)
+            .filter_map(|i| (i > 0).then_some((i - 1) as usize))
+            .collect();
+        if !indices.is_empty() {
+            quiz.correct = indices;
+        }
+    }
+    if dont_know || !chosen.is_empty() || correct.is_some() || v.get("dismissed").is_some() {
         quiz.answered = Some(Answered {
-            chosen: None,
-            correct: Some(false),
+            chosen,
+            dont_know,
+            correct,
         });
-    } else if chosen.is_some() || correct.is_some() {
-        quiz.answered = Some(Answered { chosen, correct });
     }
 }
 
@@ -680,8 +753,8 @@ pub fn load_chat(store: &Store, id: &str) -> Option<Chat> {
                     {
                         plan = Some(parse_plan(mermaid));
                     }
-                    if (name == "quiz" || name == "probe")
-                        && let Some(quiz) = quiz_from_call(&part)
+                    if (name == "quiz" || name == "probe" || name == "ask_user_question")
+                        && let Some(quiz) = quiz_from_call(&part, name != "ask_user_question", name)
                     {
                         rows.push(Row::Quiz(quiz));
                     }
@@ -745,6 +818,7 @@ pub fn load_chat(store: &Store, id: &str) -> Option<Chat> {
             continue;
         }
         let call_id = message.get("toolCallId").and_then(Value::as_str);
+        let details = message.get("details");
         let text = match message.get("content") {
             Some(Value::String(s)) => s.clone(),
             Some(Value::Array(parts)) => parts
@@ -759,7 +833,7 @@ pub fn load_chat(store: &Store, id: &str) -> Option<Chat> {
                 && call_id.is_some()
                 && q.call_id.as_deref() == call_id)
         }) {
-            apply_result(quiz, &text);
+            apply_result(quiz, &text, details);
         }
     }
     if rows.len() > 10 {
@@ -943,6 +1017,53 @@ mod tests {
         assert_eq!(quizzes.len(), 2);
         assert!(quizzes[0].answered.is_some());
         assert!(quizzes[1].answered.is_none());
+    }
+
+    #[test]
+    fn quiz_resolves_values_and_multiselect() {
+        let call = serde_json::json!({
+            "id": "call-9",
+            "arguments": {
+                "question": "Pick both",
+                "options": [
+                    {"label": "A", "value": "a"},
+                    {"label": "B", "value": "b"},
+                    {"label": "C", "value": "c"}
+                ],
+                "correctAnswer": ["a", "c"],
+                "multiSelect": true
+            }
+        });
+        let quiz = quiz_from_call(&call, true, "quiz").expect("quiz");
+        assert_eq!(quiz.values, ["a", "b", "c"]);
+        assert_eq!(quiz.correct, [0, 2]);
+        assert!(quiz.multi_select);
+        assert!(quiz.graded);
+    }
+
+    #[test]
+    fn ungraded_ask_keeps_answer_without_verdict() {
+        let mut quiz = Quiz {
+            question: "Which track?".to_owned(),
+            options: vec!["Math".to_owned(), "Code".to_owned()],
+            values: vec!["math".to_owned(), "code".to_owned()],
+            correct: Vec::new(),
+            multi_select: false,
+            graded: false,
+            tool: "ask_user_question".to_owned(),
+            answered: None,
+            call_id: Some("ask-1".to_owned()),
+        };
+        let details = serde_json::json!({
+            "kind": "ask",
+            "dontKnow": false,
+            "answers": [{"index": 2, "label": "Code", "value": "code"}]
+        });
+        apply_result(&mut quiz, "", Some(&details));
+        let answered = quiz.answered.expect("answered");
+        assert_eq!(answered.chosen, [1]);
+        assert!(answered.correct.is_none());
+        assert!(!answered.dont_know);
     }
 
     #[test]

@@ -32,7 +32,7 @@ pub struct State {
     pub reading: TextEdit,
     pub quiz_open: bool,
     pub practice_answer: TextEdit,
-    pub quiz_selected: Option<usize>,
+    pub quiz_selected: Vec<usize>,
     pub confidence: f32,
     pub model: String,
     pub models: Vec<(String, String)>,
@@ -106,7 +106,7 @@ impl State {
             reading: TextEdit::new(""),
             quiz_open: false,
             practice_answer: TextEdit::new(""),
-            quiz_selected: None,
+            quiz_selected: Vec::new(),
             confidence: 0.5,
             model,
             models: data::model_slots(),
@@ -170,7 +170,7 @@ impl State {
         self.thinking = TextEdit::new("");
         self.reading = TextEdit::new("");
         self.reply = TextEdit::new("");
-        self.quiz_selected = None;
+        self.quiz_selected.clear();
         self.quiz_open = false;
         self.confidence = 0.5;
         let (tokens, spend) = data::latest_usage(&store, id);
@@ -435,14 +435,24 @@ impl State {
                 }
                 brainroom_agent::Event::Quiz {
                     call_id,
+                    tool,
                     question,
                     options,
+                    values,
+                    correct,
+                    multi_select,
+                    graded,
                     ..
                 } => {
                     if let Some(chat) = &mut self.chat {
                         chat.rows.push(Row::Quiz(data::Quiz {
                             question: question.clone(),
                             options: options.clone(),
+                            values: values.clone(),
+                            correct: correct.clone(),
+                            multi_select,
+                            graded,
+                            tool: tool.clone(),
                             answered: None,
                             call_id: Some(call_id.clone()),
                         }));
@@ -569,6 +579,11 @@ impl State {
             chat.rows.push(Row::Quiz(data::Quiz {
                 question: "What is the derivative of $x^2$?".to_owned(),
                 options: vec!["$x$".to_owned(), "$2x$".to_owned(), "$x^2$".to_owned()],
+                values: vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+                correct: vec![1],
+                multi_select: false,
+                graded: true,
+                tool: "quiz".to_owned(),
                 answered: None,
                 call_id: Some("demo-quiz".to_owned()),
             }));
@@ -644,62 +659,176 @@ impl State {
         if quiz.answered.is_some() {
             return;
         }
-        let chosen = self.quiz_selected;
         let quiz_call = quiz.call_id.clone();
-        let correct = chosen.is_some_and(|i| i < quiz.options.len());
-        quiz.answered = Some(Answered {
-            chosen,
-            correct: Some(correct),
-        });
-        let answer = match chosen {
-            Some(i) if i < quiz.options.len() => quiz.options[i].clone(),
-            _ => "I don't know".to_owned(),
+        let tool = quiz.tool.clone();
+        let graded = quiz.graded;
+        let dont_know = self.quiz_selected.contains(&usize::MAX);
+        let mut chosen: Vec<usize> = self
+            .quiz_selected
+            .iter()
+            .copied()
+            .filter(|i| *i < quiz.options.len())
+            .collect();
+        chosen.sort_unstable();
+        chosen.dedup();
+        let correct = if graded && !dont_know {
+            let expected = {
+                let mut expected = quiz.correct.clone();
+                expected.sort_unstable();
+                expected
+            };
+            chosen == expected
+        } else {
+            false
         };
-        let confidence = (self.confidence * 100.0).round() as i32;
+        quiz.answered = Some(Answered {
+            chosen: chosen.clone(),
+            dont_know,
+            correct: if graded { Some(correct) } else { None },
+        });
+        let answers: Vec<serde_json::Value> = chosen
+            .iter()
+            .map(|index| {
+                serde_json::json!({
+                    "index": index + 1,
+                    "label": quiz.options[*index],
+                    "value": quiz.values.get(*index).cloned().unwrap_or_else(|| quiz.options[*index].clone()),
+                })
+            })
+            .collect();
+        let answer_text = if dont_know {
+            "I don't know".to_owned()
+        } else {
+            chosen
+                .iter()
+                .map(|index| quiz.options[*index].clone())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let confidence = if graded && !dont_know {
+            Some((self.confidence * 100.0).round() as i32)
+        } else {
+            None
+        };
         let thinking = self.thinking.text.trim().to_owned();
         let reading = self.reading.text.trim().to_owned();
         let id = chat.id.clone();
         self.thinking = TextEdit::new("");
+        self.quiz_selected.clear();
         self.quiz_open = false;
+        let mut compact = serde_json::Map::new();
+        compact.insert(
+            "kind".to_owned(),
+            serde_json::json!(if graded { "quiz" } else { "ask" }),
+        );
+        if dont_know {
+            compact.insert("dontKnow".to_owned(), serde_json::json!(true));
+        }
+        if !answers.is_empty() {
+            compact.insert("answers".to_owned(), serde_json::json!(answers.clone()));
+        }
+        if graded && !dont_know {
+            compact.insert("correct".to_owned(), serde_json::json!(correct));
+        }
+        if let Some(confidence) = confidence {
+            compact.insert("confidence".to_owned(), serde_json::json!(confidence));
+        }
+        if !thinking.is_empty() {
+            compact.insert("thinking".to_owned(), serde_json::json!(thinking.clone()));
+        }
+        if !reading.is_empty() {
+            compact.insert(
+                "thinkingWhileReading".to_owned(),
+                serde_json::json!(reading.clone()),
+            );
+        }
+        let compact = serde_json::Value::Object(compact);
+        let mut details = serde_json::Map::new();
+        details.insert(
+            "kind".to_owned(),
+            serde_json::json!(if graded { "quiz" } else { "ask" }),
+        );
+        details.insert("tool".to_owned(), serde_json::json!(tool));
+        details.insert("questionText".to_owned(), serde_json::json!(quiz.question));
+        details.insert(
+            "options".to_owned(),
+            serde_json::json!(
+                quiz.options
+                    .iter()
+                    .enumerate()
+                    .map(|(i, label)| {
+                        serde_json::json!({
+                            "index": i + 1,
+                            "label": label,
+                            "value": quiz.values.get(i).cloned().unwrap_or_else(|| label.clone()),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            ),
+        );
+        details.insert("dontKnow".to_owned(), serde_json::json!(dont_know));
+        details.insert("answers".to_owned(), serde_json::json!(answers));
+        if !thinking.is_empty() {
+            details.insert("thinking".to_owned(), serde_json::json!(thinking.clone()));
+        }
+        if !reading.is_empty() {
+            details.insert(
+                "readingThinking".to_owned(),
+                serde_json::json!(reading.clone()),
+            );
+        }
+        if let Some(confidence) = confidence {
+            details.insert("confidence".to_owned(), serde_json::json!(confidence));
+        }
+        if graded {
+            details.insert("correct".to_owned(), serde_json::json!(correct));
+            details.insert(
+                "correctIndices".to_owned(),
+                serde_json::json!(quiz.correct.iter().map(|i| i + 1).collect::<Vec<_>>()),
+            );
+        }
+        details.insert(
+            "answeredAt".to_owned(),
+            serde_json::json!(brainroom_core::now_iso()),
+        );
+        let details = serde_json::Value::Object(details);
         let store = data::store();
         if let Some(mut record) = store.load_chat(&id) {
-            let result = serde_json::json!({
-                "kind": "quiz",
-                "answers": [{ "index": chosen.filter(|i| *i < 100), "label": answer }],
-                "correct": correct,
-                "confidence": confidence,
-                "thinking": thinking,
-                "readingThinking": reading,
-            });
             store.append_value(
                 &mut record,
                 serde_json::json!({
                     "role": "toolResult",
-                    "toolName": "quiz",
+                    "toolName": tool,
                     "toolCallId": quiz_call,
-                    "content": result.to_string(),
+                    "content": compact.to_string(),
+                    "details": details,
+                    "isError": false,
                     "timestamp": brainroom_core::now_millis(),
                 }),
             );
         }
         if let Some(call_id) = self.pending_call.take() {
-            let mut content = format!("The learner answered: {answer}. Confidence: {confidence}%.");
-            if !thinking.is_empty() {
-                content.push_str(&format!(" Their reasoning: {thinking}"));
-            }
-            if !reading.is_empty() {
-                content.push_str(&format!(" Their reading notes: {reading}"));
-            }
             if let Some(agent) = &self.agent {
-                let _ = agent
-                    .inbox
-                    .send(brainroom_agent::Input::ToolResult { call_id, content });
+                let _ = agent.inbox.send(brainroom_agent::Input::ToolResult {
+                    call_id,
+                    content: compact.to_string(),
+                });
                 self.busy = true;
             }
         } else {
-            let mut message = format!("My answer: {answer}. Confidence: {confidence}%.");
+            let mut message = if dont_know {
+                "I don't know.".to_owned()
+            } else {
+                format!("My answer: {answer_text}.")
+            };
+            if let Some(confidence) = confidence {
+                message.push_str(&format!(" Confidence: {confidence}%."));
+            }
             if !thinking.is_empty() {
                 message.push_str(&format!(" My reasoning: {thinking}"));
+            }
+            if !reading.is_empty() {
+                message.push_str(&format!(" Reading notes: {reading}"));
             }
             self.send_message(&message);
         }
@@ -2270,7 +2399,7 @@ fn quiz_card(quiz: &data::Quiz, live: bool, s: &State, th: &Theme) -> El {
         .fill(Color { a: 0.35, ..th.card })
         .border(1.0, th.border)
         .child(
-            text("CHECK".to_owned())
+            text(if quiz.graded { "CHECK" } else { "ASK" }.to_owned())
                 .font(mono(10.0, 500.0))
                 .color(th.muted),
         )
@@ -2278,14 +2407,16 @@ fn quiz_card(quiz: &data::Quiz, live: bool, s: &State, th: &Theme) -> El {
 
     for (i, option) in quiz.options.iter().enumerate() {
         let chosen = if live {
-            s.quiz_selected == Some(i)
+            s.quiz_selected.contains(&i)
         } else {
-            quiz.answered.as_ref().and_then(|a| a.chosen) == Some(i)
+            quiz.answered
+                .as_ref()
+                .is_some_and(|a| a.chosen.contains(&i))
         };
         let is_correct = quiz
             .answered
             .as_ref()
-            .is_some_and(|a| a.chosen == Some(i) && a.correct == Some(true));
+            .is_some_and(|a| a.chosen.contains(&i) && a.correct == Some(true));
         let border = if chosen { th.fg } else { th.border_soft };
         let fill = if chosen {
             th.raised
@@ -2304,7 +2435,7 @@ fn quiz_card(quiz: &data::Quiz, live: bool, s: &State, th: &Theme) -> El {
             .child(
                 el().pt(3.0).child(
                     el().size(14.0, 14.0)
-                        .radius(7.0)
+                        .radius(if quiz.multi_select { 3.0 } else { 7.0 })
                         .border(1.5, if chosen { th.fg } else { th.border })
                         .child(if chosen {
                             el().size(6.0, 6.0).radius(3.0).fill(th.fg).center()
@@ -2315,12 +2446,22 @@ fn quiz_card(quiz: &data::Quiz, live: bool, s: &State, th: &Theme) -> El {
             )
             .child(md::para(option, th).grow(1.0));
         if live {
+            let multi = quiz.multi_select;
             row_ = row_
                 .key(format!("option-{i}"))
                 .hover(th.hover)
                 .cursor(Cursor::Pointer)
                 .on_press(move |s: &mut State| {
-                    s.quiz_selected = Some(i);
+                    if multi {
+                        if let Some(pos) = s.quiz_selected.iter().position(|x| *x == i) {
+                            s.quiz_selected.remove(pos);
+                        } else {
+                            s.quiz_selected.retain(|x| *x != usize::MAX);
+                            s.quiz_selected.push(i);
+                        }
+                    } else {
+                        s.quiz_selected = vec![i];
+                    }
                 });
         }
         card = card.child(row_);
@@ -2330,6 +2471,7 @@ fn quiz_card(quiz: &data::Quiz, live: bool, s: &State, th: &Theme) -> El {
         if let Some(answered) = &quiz.answered {
             let (label, color) = match answered.correct {
                 Some(true) => ("Correct", th.green),
+                Some(false) if answered.dont_know => ("I don't know", th.red),
                 Some(false) => ("Incorrect", th.red),
                 None => ("Answered", th.muted),
             };
@@ -2351,7 +2493,7 @@ fn quiz_card(quiz: &data::Quiz, live: bool, s: &State, th: &Theme) -> El {
     }
 
     // "I don't know"
-    let unknown_selected = live && s.quiz_selected == Some(quiz.options.len());
+    let unknown_selected = live && s.quiz_selected.contains(&usize::MAX);
     let mut unknown_row = row()
         .w_full()
         .gap(10.0)
@@ -2385,49 +2527,51 @@ fn quiz_card(quiz: &data::Quiz, live: bool, s: &State, th: &Theme) -> El {
             .hover(th.hover)
             .cursor(Cursor::Pointer)
             .on_press(|s: &mut State| {
-                s.quiz_selected = Some(usize::MAX);
+                s.quiz_selected = vec![usize::MAX];
             });
     }
     card = card.child(unknown_row);
 
-    // confidence
+    // confidence (graded quizzes only)
     let pct = (s.confidence * 100.0).round() as i32;
     let track_w = 540.0;
-    card = card.child(
-        row()
-            .w_full()
-            .gap(12.0)
-            .items_center()
-            .child(
-                text("CONFIDENCE".to_owned())
-                    .font(mono(10.0, 500.0))
-                    .color(th.muted)
-                    .w(96.0),
-            )
-            .child(
-                el().key("confidence-slider")
-                    .size(track_w, 18.0)
-                    .child(el().absolute(0.0, 8.0).size(track_w, 2.0).fill(th.border))
-                    .child(
-                        el().absolute(0.0, 8.0)
-                            .size(s.confidence * track_w, 2.0)
-                            .fill(th.gold),
-                    )
-                    .child(
-                        el().absolute(s.confidence * (track_w - 14.0), 2.0)
-                            .size(14.0, 14.0)
-                            .radius(7.0)
-                            .fill(th.gold),
-                    )
-                    .cursor(Cursor::Pointer)
-                    .on_drag(|s: &mut State, d: &mut rune::Drag, _| {
-                        if d.w > 0.0 {
-                            s.confidence = ((d.x / d.w).clamp(0.0, 1.0) * 10.0).round() / 10.0;
-                        }
-                    }),
-            )
-            .child(text(format!("{pct}%")).font(mono(11.0, 400.0)).color(th.fg)),
-    );
+    if quiz.graded {
+        card = card.child(
+            row()
+                .w_full()
+                .gap(12.0)
+                .items_center()
+                .child(
+                    text("CONFIDENCE".to_owned())
+                        .font(mono(10.0, 500.0))
+                        .color(th.muted)
+                        .w(96.0),
+                )
+                .child(
+                    el().key("confidence-slider")
+                        .size(track_w, 18.0)
+                        .child(el().absolute(0.0, 8.0).size(track_w, 2.0).fill(th.border))
+                        .child(
+                            el().absolute(0.0, 8.0)
+                                .size(s.confidence * track_w, 2.0)
+                                .fill(th.gold),
+                        )
+                        .child(
+                            el().absolute(s.confidence * (track_w - 14.0), 2.0)
+                                .size(14.0, 14.0)
+                                .radius(7.0)
+                                .fill(th.gold),
+                        )
+                        .cursor(Cursor::Pointer)
+                        .on_drag(|s: &mut State, d: &mut rune::Drag, _| {
+                            if d.w > 0.0 {
+                                s.confidence = ((d.x / d.w).clamp(0.0, 1.0) * 10.0).round() / 10.0;
+                            }
+                        }),
+                )
+                .child(text(format!("{pct}%")).font(mono(11.0, 400.0)).color(th.fg)),
+        );
+    }
 
     // thinking
     card = card.child(
@@ -2453,7 +2597,7 @@ fn quiz_card(quiz: &data::Quiz, live: bool, s: &State, th: &Theme) -> El {
             ),
     );
 
-    let ready = s.quiz_selected.is_some();
+    let ready = !s.quiz_selected.is_empty();
     let submit = el()
         .key("submit-answer")
         .h(32.0)
@@ -3337,6 +3481,102 @@ mod tests {
     }
 
     #[test]
+    fn multiselect_grades_as_a_set() {
+        let mut state = State::new();
+        state.active_id = Some("missing_test_chat".to_owned());
+        state.chat = Some(Chat {
+            id: "missing_test_chat".to_owned(),
+            title: "test".to_owned(),
+            kind: "teaching".to_owned(),
+            rows: vec![Row::User("start".to_owned())],
+            plan: None,
+        });
+        let (inbox, inputs) = channel();
+        let (events, event_rx) = channel();
+        state.agent = Some(ai::AgentHandle {
+            inbox,
+            events: event_rx,
+        });
+        events
+            .send(brainroom_agent::Event::Quiz {
+                call_id: "call-2".to_owned(),
+                tool: "quiz".to_owned(),
+                question: "Pick both".to_owned(),
+                options: vec!["A".to_owned(), "B".to_owned(), "C".to_owned()],
+                values: vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
+                correct: vec![0, 2],
+                multi_select: true,
+                graded: true,
+                explanation: None,
+            })
+            .unwrap();
+        assert!(state.poll());
+        state.quiz_selected = vec![2, 0];
+        state.submit_quiz();
+        let input = inputs
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        match input {
+            brainroom_agent::Input::ToolResult { call_id, content } => {
+                assert_eq!(call_id, "call-2");
+                let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+                assert_eq!(value["correct"], true);
+                assert_eq!(value["answers"].as_array().unwrap().len(), 2);
+                assert_eq!(value["answers"][0]["index"], 1);
+                assert_eq!(value["answers"][1]["index"], 3);
+            }
+            other => panic!("expected tool result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ask_answers_are_ungraded() {
+        let mut state = State::new();
+        state.active_id = Some("missing_test_chat".to_owned());
+        state.chat = Some(Chat {
+            id: "missing_test_chat".to_owned(),
+            title: "test".to_owned(),
+            kind: "teaching".to_owned(),
+            rows: vec![Row::User("start".to_owned())],
+            plan: None,
+        });
+        let (inbox, inputs) = channel();
+        let (events, event_rx) = channel();
+        state.agent = Some(ai::AgentHandle {
+            inbox,
+            events: event_rx,
+        });
+        events
+            .send(brainroom_agent::Event::Quiz {
+                call_id: "ask-1".to_owned(),
+                tool: "ask_user_question".to_owned(),
+                question: "Which track?".to_owned(),
+                options: vec!["Math".to_owned(), "Code".to_owned()],
+                values: vec!["math".to_owned(), "code".to_owned()],
+                correct: Vec::new(),
+                multi_select: false,
+                graded: false,
+                explanation: None,
+            })
+            .unwrap();
+        assert!(state.poll());
+        state.quiz_selected = vec![1];
+        state.submit_quiz();
+        let input = inputs
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        match input {
+            brainroom_agent::Input::ToolResult { call_id, content } => {
+                assert_eq!(call_id, "ask-1");
+                let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+                assert_eq!(value["kind"], "ask");
+                assert!(value.get("correct").is_none());
+            }
+            other => panic!("expected tool result, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn agent_events_create_a_quiz_and_answer_returns_the_tool_result() {
         let mut state = State::new();
         state.active_id = Some("missing_test_chat".to_owned());
@@ -3371,8 +3611,13 @@ mod tests {
         events
             .send(brainroom_agent::Event::Quiz {
                 call_id: "call-1".to_owned(),
+                tool: "quiz".to_owned(),
                 question: "What is 2+2?".to_owned(),
                 options: vec!["3".to_owned(), "4".to_owned()],
+                values: vec!["3".to_owned(), "four".to_owned()],
+                correct: vec![1],
+                multi_select: false,
+                graded: true,
                 explanation: None,
             })
             .unwrap();
@@ -3392,7 +3637,7 @@ mod tests {
         assert_eq!(quiz.question, "What is 2+2?");
         assert_eq!(state.pending_call.as_deref(), Some("call-1"));
 
-        state.quiz_selected = Some(1);
+        state.quiz_selected = vec![1];
         state.confidence = 0.7;
         state.submit_quiz();
         let input = inputs
@@ -3401,8 +3646,9 @@ mod tests {
         match input {
             brainroom_agent::Input::ToolResult { call_id, content } => {
                 assert_eq!(call_id, "call-1");
-                assert!(content.contains("4"));
-                assert!(content.contains("70%"));
+                assert!(content.contains("\"label\":\"4\""));
+                assert!(content.contains("\"confidence\":70"));
+                assert!(content.contains("\"correct\":true"));
             }
             other => panic!("expected tool result, got {other:?}"),
         }
