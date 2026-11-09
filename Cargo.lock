@@ -573,6 +573,7 @@ dependencies = [
  "rune",
  "rune-kit",
  "serde_json",
+ "time",
 ]
 
 [[package]]

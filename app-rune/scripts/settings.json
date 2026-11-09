@@ -1,1 +1,1 @@
-{"events":[{"t":0.2,"type":"tap","key":"home-settings"},{"t":0.7,"type":"tap","key":"settings-nav-1"}]}
+{"events":[{"t":0.2,"type":"tap","key":"settings-button"},{"t":0.7,"type":"tap","key":"settings-nav-1"}]}

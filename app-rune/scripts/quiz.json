@@ -1,1 +1,1 @@
-{"events":[{"t":0.2,"type":"tap","key":"option-1"},{"t":0.5,"type":"tap","key":"submit-answer"}]}
+{"events":[{"t":0.2,"type":"tap","key":"quiz-collapsed"},{"t":0.4,"type":"tap","key":"option-1"},{"t":0.6,"type":"tap","key":"submit-answer"}]}

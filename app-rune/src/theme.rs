@@ -97,14 +97,16 @@ pub fn prose() -> TextStyle {
 }
 
 /// Titles: CMU Serif bold.
+pub fn source(size: f32, weight: f32) -> TextStyle {
+    TextStyle::new(size, weight)
+        .family(PROSE_FAMILY)
+        .lh((size * 1.3).round())
+}
+
 pub fn serif(size: f32, weight: f32) -> TextStyle {
     TextStyle::new(size, weight)
         .family(SERIF)
         .lh((size * 1.3).round())
-}
-
-pub fn section_title() -> TextStyle {
-    serif(19.0, 700.0)
 }
 
 pub const ICON_MARK: Icon = Icon {
@@ -191,14 +193,14 @@ pub const CHAIN: Icon = Icon {
     body: r#"<path d="M8 6h13M8 12h13M8 18h13" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/><circle cx="3.5" cy="6" r="1.3" fill="currentColor"/><circle cx="3.5" cy="12" r="1.3" fill="currentColor"/><circle cx="3.5" cy="18" r="1.3" fill="currentColor"/>"#,
 };
 
+pub const PLAY: Icon = Icon {
+    name: "lh-play",
+    view: 24.0,
+    body: r#"<circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.5"/><path d="M10 8.5 16 12l-6 3.5z" fill="currentColor"/>"#,
+};
+
 pub const CHECK: Icon = Icon {
     name: "lh-check",
     view: 24.0,
     body: r#"<path d="m5 12 5 5L20 7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>"#,
-};
-
-pub const THINKING: Icon = Icon {
-    name: "lh-thinking",
-    view: 24.0,
-    body: r#"<circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="1.5"/><path d="M8.5 12h.01M12 12h.01M15.5 12h.01" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>"#,
 };

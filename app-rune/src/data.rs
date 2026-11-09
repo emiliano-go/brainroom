@@ -24,6 +24,7 @@ pub struct Quiz {
     pub question: String,
     pub options: Vec<String>,
     pub answered: Option<Answered>,
+    pub call_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -232,6 +233,19 @@ fn short_date(iso: &str) -> String {
     }
 }
 
+fn session_date(iso: &str) -> String {
+    let Ok(t) = time::OffsetDateTime::parse(iso, &time::format_description::well_known::Rfc3339)
+    else {
+        return short_date(iso);
+    };
+    let secs = (time::OffsetDateTime::now_utc() - t).whole_seconds();
+    match secs {
+        s if (0..3600).contains(&s) => format!("{}m ago", (s / 60).max(1)),
+        s if (3600..86_400).contains(&s) => format!("{}h ago", s / 3600),
+        _ => short_date(iso),
+    }
+}
+
 pub fn sessions(store: &Store) -> Vec<SessionRow> {
     store
         .list_chats()
@@ -243,7 +257,7 @@ pub fn sessions(store: &Store) -> Vec<SessionRow> {
                 .and_then(|v| v.get("kind").and_then(Value::as_str).map(str::to_owned))
                 .unwrap_or_else(|| "teaching".to_owned());
             SessionRow {
-                status: format!("Waiting for input · {}", short_date(&c.updated_at)),
+                status: format!("Waiting for input · {}", session_date(&c.updated_at)),
                 id: c.id,
                 title: c.title,
                 kind,
@@ -460,6 +474,7 @@ fn quiz_from_call(call: &Value) -> Option<Quiz> {
         question,
         options,
         answered: None,
+        call_id: call.get("id").and_then(Value::as_str).map(str::to_owned),
     })
 }
 
@@ -595,6 +610,31 @@ pub fn parse_plan(src: &str) -> Plan {
     }
 }
 
+pub fn latest_usage(store: &Store, id: &str) -> (u64, f64) {
+    let Some(record) = store.load_chat(id) else {
+        return (0, 0.0);
+    };
+    for message in record.messages.iter().rev() {
+        let Some(usage) = message.get("usage") else {
+            continue;
+        };
+        let tokens = usage
+            .get("totalTokens")
+            .and_then(Value::as_u64)
+            .or_else(|| usage.get("total_tokens").and_then(Value::as_u64))
+            .unwrap_or(0);
+        let cost = usage
+            .get("cost")
+            .and_then(|c| c.get("total"))
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        if tokens > 0 {
+            return (tokens, cost);
+        }
+    }
+    (0, 0.0)
+}
+
 pub fn load_chat(store: &Store, id: &str) -> Option<Chat> {
     let record = store.load_chat(id)?;
     let mut rows: Vec<Row> = Vec::new();
@@ -704,6 +744,7 @@ pub fn load_chat(store: &Store, id: &str) -> Option<Chat> {
         if name != "quiz" && name != "probe" {
             continue;
         }
+        let call_id = message.get("toolCallId").and_then(Value::as_str);
         let text = match message.get("content") {
             Some(Value::String(s)) => s.clone(),
             Some(Value::Array(parts)) => parts
@@ -713,9 +754,11 @@ pub fn load_chat(store: &Store, id: &str) -> Option<Chat> {
                 .join("\n"),
             _ => continue,
         };
-        if let Some(Row::Quiz(quiz)) = rows.iter_mut().rev().find(|r| matches!(r, Row::Quiz(_)))
-            && quiz.answered.is_none()
-        {
+        if let Some(Row::Quiz(quiz)) = rows.iter_mut().rev().find(|r| {
+            matches!(r, Row::Quiz(q) if q.answered.is_none()
+                && call_id.is_some()
+                && q.call_id.as_deref() == call_id)
+        }) {
             apply_result(quiz, &text);
         }
     }
@@ -869,6 +912,37 @@ mod tests {
         assert!(
             matches!(&blocks[1], Block::Table(rows) if rows.len() == 2 && rows[0] == ["A", "B"])
         );
+    }
+
+    #[test]
+    fn quiz_results_match_their_own_call() {
+        let root = std::env::temp_dir().join(format!("br-rune-test-{}", std::process::id()));
+        let chats = root.join("chats");
+        std::fs::create_dir_all(&chats).unwrap();
+        let record = serde_json::json!({
+            "id": "chat_test",
+            "title": "Test",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z",
+            "messages": [
+                {"role": "assistant", "content": [{"type": "toolCall", "id": "c1", "name": "quiz",
+                    "arguments": {"question": "Q1", "options": [{"label": "a"}]}}]},
+                {"role": "toolResult", "toolName": "quiz", "toolCallId": "c1",
+                    "content": "{\"kind\":\"quiz\",\"dontKnow\":true}"},
+                {"role": "assistant", "content": [{"type": "toolCall", "id": "c2", "name": "quiz",
+                    "arguments": {"question": "Q2", "options": [{"label": "b"}]}}]}
+            ]
+        });
+        std::fs::write(chats.join("chat_test.json"), record.to_string()).unwrap();
+        let chat = load_chat(&Store::new(root), "chat_test").unwrap();
+        let quizzes: Vec<&Quiz> = chat
+            .rows
+            .iter()
+            .filter_map(|r| if let Row::Quiz(q) = r { Some(q) } else { None })
+            .collect();
+        assert_eq!(quizzes.len(), 2);
+        assert!(quizzes[0].answered.is_some());
+        assert!(quizzes[1].answered.is_none());
     }
 
     #[test]
