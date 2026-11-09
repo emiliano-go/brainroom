@@ -16,6 +16,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 futures-util = "0.3"
 anyhow = "1"
+brainroom-ai = { path = "../crates/ai" }
 brainroom-core = { path = "../crates/core" }
 brainroom-store = { path = "../crates/store" }
 

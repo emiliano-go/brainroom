@@ -108,13 +108,42 @@ impl Store {
         }
     }
 
+    pub fn delete_chat(&self, id: &str) -> bool {
+        if !valid_id(id) {
+            return false;
+        }
+        fs::remove_file(self.chats_dir().join(format!("{id}.json"))).is_ok()
+    }
+
+    pub fn rename_chat(&self, id: &str, title: &str) -> Option<ChatRecord> {
+        let mut record = self.load_chat(id)?;
+        record.title = title.trim().to_owned();
+        record.updated_at = now_iso();
+        self.save_chat(&record);
+        Some(record)
+    }
+
     pub fn append_message(&self, record: &mut ChatRecord, role: &str, content: &str) {
+        // LearnHarness stores user turns as a string and assistant turns as typed parts.
+        let content = if role == "assistant" {
+            json!([{ "type": "text", "text": content }])
+        } else {
+            json!(content)
+        };
         let message = json!({
             "id": new_message_id(),
             "role": role,
             "content": content,
             "timestamp": now_millis(),
         });
+        record.messages.push(message);
+        record.updated_at = now_iso();
+        record.version = Some(CURRENT_CHAT_VERSION);
+        self.save_chat(record);
+    }
+
+    /// Append a fully-formed message (tool results, imported turns) and save.
+    pub fn append_value(&self, record: &mut ChatRecord, message: serde_json::Value) {
         record.messages.push(message);
         record.updated_at = now_iso();
         record.version = Some(CURRENT_CHAT_VERSION);
@@ -196,9 +225,24 @@ mod tests {
         assert_eq!(store.list_chats().len(), 1);
         assert_eq!(store.load_chat(&id).unwrap().title, "Gradient descent");
         store.append_message(&mut chat, "user", "hello");
+        store.append_message(&mut chat, "assistant", "hi there");
         let loaded = store.load_chat(&id).unwrap();
-        assert_eq!(loaded.messages.len(), 1);
+        assert_eq!(loaded.messages.len(), 2);
         assert_eq!(loaded.messages[0]["content"], "hello");
+        assert_eq!(loaded.messages[1]["content"][0]["type"], "text");
+        assert_eq!(loaded.messages[1]["content"][0]["text"], "hi there");
+    }
+
+    #[test]
+    fn deletes_and_renames() {
+        let store = temp_store();
+        let chat = store.create_chat("old title");
+        let renamed = store.rename_chat(&chat.id, "new title").unwrap();
+        assert_eq!(renamed.title, "new title");
+        assert_eq!(store.load_chat(&chat.id).unwrap().title, "new title");
+        assert!(store.delete_chat(&chat.id));
+        assert!(store.load_chat(&chat.id).is_none());
+        assert!(!store.delete_chat("../auth"));
     }
 
     #[test]

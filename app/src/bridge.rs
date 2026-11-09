@@ -1,13 +1,11 @@
 use core::pin::Pin;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, anyhow, bail};
+use brainroom_ai as ai;
 use brainroom_core::ChatRecord;
 use brainroom_store::Store;
 use cxx_qt::CxxQtType;
 use cxx_qt_lib::QString;
-use futures_util::StreamExt;
 
 #[cxx_qt::bridge]
 pub mod qobject {
@@ -107,53 +105,6 @@ impl Default for AppControllerRust {
     }
 }
 
-fn home_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
-fn read_json(path: &std::path::Path) -> Option<serde_json::Value> {
-    let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text).ok()
-}
-
-fn api_key() -> Option<String> {
-    if let Ok(key) = std::env::var("OPENROUTER_API_KEY")
-        && !key.is_empty()
-    {
-        return Some(key);
-    }
-    for path in [
-        home_dir().join(".config/LearnHarness/auth.json"),
-        home_dir().join(".config/Brainroom/auth.json"),
-    ] {
-        if let Some(value) = read_json(&path)
-            && let Some(key) = value.get("OPENROUTER_API_KEY").and_then(|v| v.as_str())
-            && !key.is_empty()
-        {
-            return Some(key.to_string());
-        }
-    }
-    None
-}
-
-fn model_id() -> String {
-    if let Some(model) = Store::new(Store::default_dir()).strong_model() {
-        return model.id;
-    }
-    let settings = home_dir().join(".config/LearnHarness/data/settings.json");
-    if let Some(value) = read_json(&settings)
-        && let Some(id) = value
-            .pointer("/models/strong/model/id")
-            .and_then(|v| v.as_str())
-        && !id.is_empty()
-    {
-        return id.to_string();
-    }
-    "nvidia/nemotron-3-ultra-550b-a55b".to_string()
-}
-
 fn message_text(message: &serde_json::Value) -> String {
     if let Some(text) = message.get("content").and_then(|value| value.as_str()) {
         return text.to_string();
@@ -183,85 +134,6 @@ fn title_from_prompt(prompt: &str) -> String {
     } else {
         text
     }
-}
-
-fn runtime() -> &'static tokio::runtime::Runtime {
-    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RT.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .worker_threads(2)
-            .build()
-            .expect("tokio runtime")
-    })
-}
-
-const SYSTEM_PROMPT: &str = "You are Brainroom, a concise, rigorous tutor. \
-Ask one useful question at a time when the learner's understanding is unclear. \
-Prefer explanation and a worked example before checking. Be honest about uncertainty.";
-
-async fn stream_chat<F>(prompt: String, mut on_chunk: F) -> anyhow::Result<()>
-where
-    F: FnMut(&str) + Send,
-{
-    let key = api_key().ok_or_else(|| {
-        anyhow!(
-            "No OpenRouter API key found. Put OPENROUTER_API_KEY in \
-             ~/.config/Brainroom/auth.json or ~/.config/LearnHarness/auth.json."
-        )
-    })?;
-    let client = reqwest::Client::new();
-    let body = serde_json::json!({
-        "model": model_id(),
-        "stream": true,
-        "max_tokens": 2048,
-        "messages": [
-            { "role": "system", "content": SYSTEM_PROMPT },
-            { "role": "user", "content": prompt }
-        ]
-    });
-    let response = client
-        .post("https://openrouter.ai/api/v1/chat/completions")
-        .header("Authorization", format!("Bearer {key}"))
-        .header("Content-Type", "application/json")
-        .header("HTTP-Referer", "https://github.com/emiliano-go/brainroom")
-        .header("X-Title", "Brainroom")
-        .json(&body)
-        .send()
-        .await
-        .context("OpenRouter request failed")?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        bail!("OpenRouter {status}: {text}");
-    }
-
-    let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
-    while let Some(chunk) = stream.next().await {
-        let bytes = chunk.context("OpenRouter stream error")?;
-        buffer.push_str(&String::from_utf8_lossy(&bytes));
-        while let Some(pos) = buffer.find('\n') {
-            let line: String = buffer.drain(..=pos).collect();
-            let line = line.trim();
-            let Some(data) = line.strip_prefix("data:") else {
-                continue;
-            };
-            let data = data.trim();
-            if data == "[DONE]" {
-                return Ok(());
-            }
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(data)
-                && let Some(text) = value
-                    .pointer("/choices/0/delta/content")
-                    .and_then(|v| v.as_str())
-                && !text.is_empty()
-            {
-                on_chunk(text);
-            }
-        }
-    }
-    Ok(())
 }
 
 impl qobject::AppController {
@@ -297,9 +169,15 @@ impl qobject::AppController {
         self.as_mut().set_busy(true);
         self.as_mut().set_error_text(QString::default());
         self.as_mut().set_stream_text(QString::default());
-        runtime().spawn(async move {
+        let data_dir = Store::default_dir();
+        let lh_dir = ai::home_dir().join(".config/LearnHarness/data");
+        let model = Store::new(data_dir.clone())
+            .strong_model()
+            .map(|m| m.id)
+            .unwrap_or_else(|| ai::model_id(&lh_dir));
+        ai::runtime().spawn(async move {
             let stream_state = state.clone();
-            let result = stream_chat(prompt, move |delta| {
+            let result = ai::stream_chat(&model, vec![("user".to_owned(), prompt)], move |delta| {
                 if let Ok(mut chat) = stream_state.lock() {
                     chat.text.push_str(delta);
                 }

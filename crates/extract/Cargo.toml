@@ -1,0 +1,16 @@
+[package]
+name = "brainroom-extract"
+version = "0.0.1"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+brainroom-ai = { path = "../ai" }
+brainroom-agent = { path = "../agent" }
+brainroom-core = { path = "../core" }
+brainroom-store = { path = "../store" }
