@@ -1,5 +1,7 @@
 //! The teaching agent: an OpenAI-style tool loop that stops for learner answers.
 
+mod prompts;
+
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
@@ -333,17 +335,12 @@ fn emit_tool_result(
     });
 }
 
-fn system_message(mode: Mode) -> Message {
-    let content = match mode {
-        Mode::Teach => brainroom_ai::SYSTEM_PROMPT,
-        Mode::Practice => {
-            "You are Brainroom's practice coach. Pose exactly one problem with the problem tool, \
-             wait for the learner's answer, then call conclude with a plain-language verdict and \
-             the model solution. Never reveal the solution before conclude. Keep the learner working; \
-             add a hint only when they are stuck."
-        }
+fn system_message(mode: Mode, data_dir: &Path) -> Message {
+    let kind = match mode {
+        Mode::Teach => prompts::AgentKind::Teacher,
+        Mode::Practice => prompts::AgentKind::Practice,
     };
-    json!({ "role": "system", "content": content })
+    json!({ "role": "system", "content": prompts::compose(kind, data_dir) })
 }
 
 pub fn user_message(text: &str) -> Message {
@@ -481,7 +478,7 @@ pub fn run_with_mode(
     mode: Mode,
 ) {
     let mut problem_solution: Option<String> = None;
-    let mut messages = vec![system_message(mode)];
+    let mut messages = vec![system_message(mode, &data_dir)];
     messages.extend(initial);
     while let Ok(first) = inbox.recv() {
         match first {

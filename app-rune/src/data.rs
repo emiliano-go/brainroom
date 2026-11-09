@@ -312,6 +312,30 @@ pub fn parse_markdown(text: &str) -> Vec<Block> {
             blocks.push(Block::Display(tex.trim().to_owned()));
             continue;
         }
+        if let Some(rest) = t.strip_prefix("\\[") {
+            flush(&mut para, &mut blocks);
+            let mut tex = String::new();
+            if let Some(end) = rest.find("\\]") {
+                tex.push_str(&rest[..end]);
+            } else {
+                tex.push_str(rest);
+                for l in lines.by_ref() {
+                    if let Some(end) = l.find("\\]") {
+                        if !tex.is_empty() {
+                            tex.push('\n');
+                        }
+                        tex.push_str(&l[..end]);
+                        break;
+                    }
+                    if !tex.is_empty() {
+                        tex.push('\n');
+                    }
+                    tex.push_str(l);
+                }
+            }
+            blocks.push(Block::Display(tex.trim().to_owned()));
+            continue;
+        }
         let tr = t.trim();
         if tr.starts_with("```") {
             flush(&mut para, &mut blocks);
@@ -1027,6 +1051,12 @@ mod tests {
         assert_eq!(quizzes.len(), 2);
         assert!(quizzes[0].answered.is_some());
         assert!(quizzes[1].answered.is_none());
+    }
+
+    #[test]
+    fn parses_bracket_display_math() {
+        let blocks = parse_markdown("before\n\n\\[\n\\Theta(n^2)\n\\]\n\nafter");
+        assert!(matches!(&blocks[1], Block::Display(tex) if tex.contains("Theta")));
     }
 
     #[test]
