@@ -214,15 +214,16 @@ fn teach_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "list_sessions",
-            description: "List the learner's previous sessions.",
+            description: "List the sessions of the learner's persistent knowledge graph — every chat or imported-notes file that contributed a proposition, most recent first, with names, kinds, counts, dates and ids. Use the id with list_propositions.",
             parameters: json!({ "type": "object", "properties": {} }),
         },
         ToolSpec {
             name: "list_propositions",
-            description: "List propositions in the learner's knowledge graph.",
+            description: "List the propositions BORN in one knowledge-graph session — names only, no statement text. Pass the id exactly as list_sessions reported it.",
             parameters: json!({
                 "type": "object",
-                "properties": { "session": { "type": "string" } }
+                "properties": { "session": { "type": "string", "description": "Session id from list_sessions." } },
+                "required": ["session"]
             }),
         },
         ToolSpec {
@@ -320,13 +321,17 @@ fn prober_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "list_sessions",
-            description: "List the learner's previous sessions.",
+            description: "List the sessions of the learner's persistent knowledge graph — every chat or imported-notes file that contributed a proposition, most recent first, with names, kinds, counts, dates and ids. Use the id with list_propositions.",
             parameters: json!({ "type": "object", "properties": {} }),
         },
         ToolSpec {
             name: "list_propositions",
-            description: "List propositions in the learner's knowledge graph.",
-            parameters: json!({ "type": "object", "properties": { "session": { "type": "string" } } }),
+            description: "List the propositions born in one knowledge-graph session — names only.",
+            parameters: json!({
+                "type": "object",
+                "properties": { "session": { "type": "string", "description": "Session id from list_sessions." } },
+                "required": ["session"]
+            }),
         },
     ]
 }
@@ -368,12 +373,16 @@ fn practice_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "list_propositions",
-            description: "List propositions in the learner's knowledge graph.",
-            parameters: json!({ "type": "object", "properties": { "session": { "type": "string" } } }),
+            description: "List the propositions born in one knowledge-graph session — names only.",
+            parameters: json!({
+                "type": "object",
+                "properties": { "session": { "type": "string", "description": "Session id from list_sessions." } },
+                "required": ["session"]
+            }),
         },
         ToolSpec {
             name: "list_sessions",
-            description: "List the learner's previous sessions.",
+            description: "List the sessions of the learner's persistent knowledge graph — every chat or imported-notes file that contributed a proposition, most recent first, with names, kinds, counts, dates and ids. Use the id with list_propositions.",
             parameters: json!({ "type": "object", "properties": {} }),
         },
     ]
@@ -562,27 +571,141 @@ fn quiz_question(call: &ToolCall) -> String {
         .to_owned()
 }
 
-fn list_sessions(data_dir: &Path) -> String {
-    let store = brainroom_store::Store::new(data_dir.to_path_buf());
-    serde_json::to_string(&store.list_chats()).unwrap_or_else(|_| "[]".to_owned())
+fn graph_tools_enabled(data_dir: &Path) -> bool {
+    let settings = std::fs::read_to_string(data_dir.join("settings.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+    let graph_on = settings
+        .as_ref()
+        .and_then(|s| s.pointer("/graph/enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let tools_on = settings
+        .as_ref()
+        .and_then(|s| s.pointer("/agent/graphTools/enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    graph_on && tools_on
 }
 
-fn list_propositions(data_dir: &Path) -> String {
-    let path = data_dir.join("graph/nodes.jsonl");
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return "[]".to_owned();
-    };
-    let nodes: Vec<Value> = text
+fn tools_for_session(mode: Mode, graph_enabled: bool) -> Vec<ToolSpec> {
+    let mut tools = tools_for(mode);
+    if !graph_enabled {
+        tools.retain(|tool| !matches!(tool.name, "list_sessions" | "list_propositions"));
+    }
+    tools
+}
+
+fn graph_nodes(data_dir: &Path) -> Vec<Value> {
+    let mut seen = std::collections::HashSet::new();
+    std::fs::read_to_string(data_dir.join("graph/nodes.jsonl"))
+        .unwrap_or_default()
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .map(|v| {
-            json!({
-                "name": v.get("name").and_then(Value::as_str).unwrap_or_default(),
-                "statement": v.get("statement").and_then(Value::as_str).unwrap_or_default(),
-            })
+        .filter(|node| {
+            node.get("id")
+                .and_then(Value::as_str)
+                .map(|id| seen.insert(id.to_owned()))
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
+fn birth_session(node: &Value) -> Option<&str> {
+    node.get("provenance")
+        .and_then(Value::as_array)
+        .and_then(|points| points.first())
+        .and_then(|point| point.get("chatId"))
+        .and_then(Value::as_str)
+}
+
+fn list_sessions(data_dir: &Path) -> String {
+    let nodes = graph_nodes(data_dir);
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for node in &nodes {
+        if let Some(birth) = birth_session(node) {
+            *counts.entry(birth.to_owned()).or_default() += 1;
+        }
+    }
+    if counts.is_empty() {
+        return "The knowledge graph is empty — no session has contributed propositions yet."
+            .to_owned();
+    }
+    let store = brainroom_store::Store::new(data_dir.to_path_buf());
+    let mut entries: Vec<(String, String, String, String, usize)> = Vec::new();
+    let sources: Value = std::fs::read_to_string(data_dir.join("graph/sources.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or(Value::Null);
+    for (id, propositions) in counts {
+        if let Some(chat) = store.load_chat(&id) {
+            entries.push((
+                id,
+                chat.title,
+                "chat".to_owned(),
+                format!("{}, last active {}", chat.created_at, chat.updated_at),
+                propositions,
+            ));
+        } else {
+            let source = sources.get(&id);
+            let name = source
+                .and_then(|s| s.get("filePath"))
+                .and_then(Value::as_str)
+                .unwrap_or(&id)
+                .to_owned();
+            let stamp = source
+                .and_then(|s| s.get("importedAt"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown date")
+                .to_owned();
+            entries.push((id, name, "file".to_owned(), stamp, propositions));
+        }
+    }
+    entries.sort_by(|a, b| b.3.cmp(&a.3));
+    let lines: Vec<String> = entries
+        .iter()
+        .enumerate()
+        .map(|(i, (id, name, kind, dates, propositions))| {
+            let plural = if *propositions == 1 { "" } else { "s" };
+            format!(
+                "{}. {name} ({kind}, {propositions} proposition{plural}, born {dates}) — id: {id}",
+                i + 1
+            )
         })
         .collect();
-    serde_json::to_string(&nodes).unwrap_or_else(|_| "[]".to_owned())
+    format!(
+        "{} session(s) in the knowledge graph, most recent first:\n{}",
+        entries.len(),
+        lines.join("\n")
+    )
+}
+
+fn list_propositions(data_dir: &Path, session: &str) -> String {
+    let mut names: Vec<(String, String)> = graph_nodes(data_dir)
+        .into_iter()
+        .filter(|node| birth_session(node) == Some(session))
+        .filter_map(|node| {
+            Some((
+                node.get("id").and_then(Value::as_str)?.to_owned(),
+                node.get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            ))
+        })
+        .collect();
+    if names.is_empty() {
+        return format!(
+            "No propositions born in session \"{session}\". Call list_sessions for the current ids."
+        );
+    }
+    names.sort_by(|a, b| a.0.cmp(&b.0));
+    let lines: Vec<String> = names.iter().map(|(_, name)| format!("- {name}")).collect();
+    format!(
+        "{} proposition(s) covered in this session:\n{}",
+        names.len(),
+        lines.join("\n")
+    )
 }
 
 fn active_problem(messages: &[Message]) -> bool {
@@ -781,6 +904,7 @@ pub fn run_with_mode(
     let mut messages = vec![system_message(mode, &data_dir)];
     let mut plan_nodes = existing_plan_nodes(&initial);
     let mut problem_active = active_problem(&initial);
+    let session_tools = tools_for_session(mode, graph_tools_enabled(&data_dir));
     messages.extend(initial);
     while let Ok(first) = inbox.recv() {
         match first {
@@ -796,7 +920,7 @@ pub fn run_with_mode(
                 let _ = emit.send(Event::Error("agent exceeded 12 tool steps".to_owned()));
                 break;
             }
-            let turn = match completer.complete(&messages, &tools_for(mode)) {
+            let turn = match completer.complete(&messages, &session_tools) {
                 Ok(turn) => turn,
                 Err(error) => {
                     let _ = emit.send(Event::Error(error.to_string()));
@@ -1067,7 +1191,12 @@ pub fn run_with_mode(
                         emit_tool_result(&emit, &call.id, &call.name, content, None, false, 0);
                     }
                     "list_propositions" => {
-                        let content = list_propositions(&data_dir);
+                        let session = call
+                            .arguments
+                            .get("session")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        let content = list_propositions(&data_dir, session);
                         messages.push(tool_result(&call.id, &content));
                         emit_tool_result(&emit, &call.id, &call.name, content, None, false, 0);
                     }
@@ -1636,6 +1765,34 @@ mod tests {
         }
         assert!(error);
         assert!(!posed);
+    }
+
+    #[test]
+    fn graph_tools_are_gated_and_session_scoped() {
+        let dir = std::env::temp_dir().join(format!("br-graph-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("graph")).unwrap();
+        std::fs::write(
+            dir.join("graph/nodes.jsonl"),
+            "{\"id\":\"n1\",\"name\":\"Alpha\",\"provenance\":[{\"chatId\":\"chat_a\",\"messageId\":\"m1\"}]}\n{\"id\":\"n2\",\"name\":\"Beta\",\"provenance\":[{\"chatId\":\"chat_a\",\"messageId\":\"m2\"}]}\n{\"id\":\"n3\",\"name\":\"Gamma\",\"provenance\":[{\"chatId\":\"chat_b\",\"messageId\":\"m3\"}]}\n",
+        )
+        .unwrap();
+        let sessions = list_sessions(&dir);
+        assert!(sessions.contains("2 session(s)"));
+        assert!(sessions.contains("id: chat_a"));
+        let props = list_propositions(&dir, "chat_a");
+        assert!(props.contains("2 proposition(s)"));
+        assert!(props.contains("- Alpha"));
+        assert!(!props.contains("statement"));
+        let names: Vec<&str> = tools_for_session(Mode::Prober, false)
+            .iter()
+            .map(|tool| tool.name)
+            .collect();
+        assert!(!names.contains(&"list_sessions"));
+        assert!(
+            tools_for_session(Mode::Prober, true)
+                .iter()
+                .any(|tool| tool.name == "list_sessions")
+        );
     }
 
     #[test]
