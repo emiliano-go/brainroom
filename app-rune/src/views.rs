@@ -184,21 +184,29 @@ impl State {
     }
 
     pub fn import_notes(&mut self, path: std::path::PathBuf) {
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            self.stream_error = Some("Could not read the selected notes file".to_owned());
+        if self.extracting {
+            self.extract_status = Some("Another extraction is already running".to_owned());
             return;
-        };
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("Imported notes");
-        let store = data::store();
-        let record = store.create_chat(&format!("Imported: {name}"));
-        self.active_id = Some(record.id);
-        self.chat = None;
-        self.send_message(&format!(
-            "These are my notes. Teach me from them:\n\n{text}"
-        ));
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.extracting = true;
+        self.extract_rx = Some(rx);
+        self.extract_status = Some("Extracting notes…".to_owned());
+        std::thread::spawn(move || {
+            let data = crate::data::data_dir();
+            let model = brainroom_ai::model_id(&data);
+            let extractor = brainroom_extract::OpenRouterExtractor {
+                model: model.clone(),
+                timeout: std::time::Duration::from_secs(120),
+            };
+            let auditor = brainroom_extract::OpenRouterAuditor {
+                model,
+                timeout: std::time::Duration::from_secs(120),
+            };
+            let result = brainroom_extract::run_notes(&extractor, Some(&auditor), &data, &path)
+                .map_err(|e| e.to_string());
+            let _ = tx.send(result);
+        });
     }
 
     pub fn start_topic(&mut self) {
@@ -315,11 +323,16 @@ impl State {
             let data = crate::data::data_dir();
             let model = brainroom_ai::model_id(&data);
             let extractor = brainroom_extract::OpenRouterExtractor {
+                model: model.clone(),
+                timeout: std::time::Duration::from_secs(120),
+            };
+            let auditor = brainroom_extract::OpenRouterAuditor {
                 model,
                 timeout: std::time::Duration::from_secs(120),
             };
             let result =
-                brainroom_extract::run(&extractor, &data, &chat_id).map_err(|e| e.to_string());
+                brainroom_extract::run_with_auditor(&extractor, Some(&auditor), &data, &chat_id)
+                    .map_err(|e| e.to_string());
             let _ = tx.send(result);
         });
     }
