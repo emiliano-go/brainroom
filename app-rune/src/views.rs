@@ -4,6 +4,7 @@ use crate::ai;
 use crate::data::{self, Answered, Chat, Graph, Row, SessionRow};
 use crate::md;
 use crate::theme::{self, Theme, mono, prose, serif, source};
+use brainroom_agent::Completer;
 use rune::{
     Color, Cursor, Cx, El, LineCap, ScrollSpec, Shape, TextEdit, col, el, icon, row, text,
     text_input,
@@ -337,6 +338,89 @@ impl State {
         });
     }
 
+    fn maybe_compact(&mut self, chat_id: &str) {
+        let store = data::store();
+        let Some(record) = store.load_chat(chat_id) else {
+            return;
+        };
+        let messages = &record.messages;
+        let tokens = brainroom_core::compaction::estimate_tokens(messages);
+        let configured = data::settings_value()
+            .and_then(|value| {
+                value
+                    .pointer("/compaction/thresholdTokens")
+                    .and_then(serde_json::Value::as_u64)
+            })
+            .unwrap_or(brainroom_core::compaction::DEFAULT_COMPACTION_THRESHOLD_TOKENS);
+        let threshold = configured
+            .min(202_800u64.saturating_sub(brainroom_core::compaction::COMPACTION_RESERVE_TOKENS));
+        if tokens < threshold {
+            return;
+        }
+        let mut cut = brainroom_core::compaction::cut_index(
+            messages,
+            brainroom_core::compaction::KEEP_RECENT_TOKENS,
+        );
+        while cut < messages.len()
+            && messages[cut]
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_none()
+        {
+            cut += 1;
+        }
+        if cut == 0 || cut >= messages.len() {
+            return;
+        }
+        let Some(first_kept) = messages[cut]
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        let span = brainroom_core::compaction::serialize_for_summary(&messages[..cut]);
+        let plan = record
+            .extra
+            .get("tree")
+            .and_then(brainroom_core::compaction::plan_tree_text);
+        let kind = record.kind.as_deref().unwrap_or("teach");
+        let prompt = brainroom_core::compaction::build_prompt(&span, plan.as_deref(), kind);
+        let model = brainroom_ai::model_id(&data::data_dir());
+        let completer = brainroom_agent::OpenRouter {
+            model: model.clone(),
+            timeout: std::time::Duration::from_secs(120),
+        };
+        let Ok(turn) = completer.complete(
+            &[serde_json::json!({ "role": "user", "content": prompt })],
+            &[],
+        ) else {
+            return;
+        };
+        let summary = turn.text.trim();
+        if summary.is_empty() {
+            return;
+        }
+        let mut marker = serde_json::json!({
+            "id": brainroom_store::new_message_id(),
+            "role": "custom",
+            "customType": "compaction",
+            "content": format!("{}\n\n{summary}", brainroom_core::compaction::COMPACTED_HISTORY_HEADER),
+            "display": true,
+            "details": {
+                "firstKeptMessageId": first_kept,
+                "tokensBefore": tokens,
+                "model": model,
+                "at": brainroom_core::now_iso(),
+            },
+            "timestamp": brainroom_core::now_millis(),
+        });
+        let store = data::store();
+        if let Some(mut record) = store.load_chat(chat_id) {
+            store.append_value(&mut record, marker.take());
+        }
+    }
+
     pub fn send_message(&mut self, text: &str) {
         let text = text.trim().to_owned();
         if text.is_empty() {
@@ -368,6 +452,8 @@ impl State {
         store.append_message(&mut record, "user", &text);
         self.active_id = Some(id.clone());
         self.sessions = data::sessions(&store);
+        self.chat = data::load_chat(&store, &id);
+        self.maybe_compact(&id);
         self.chat = data::load_chat(&store, &id);
         self.view = View::Session;
         self.reply = TextEdit::new("");
@@ -976,7 +1062,17 @@ fn append_tool_result(
 
 fn model_history(messages: &[serde_json::Value]) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
-    for message in messages {
+    let start = brainroom_core::compaction::active_marker(messages)
+        .and_then(|marker| {
+            let kept = brainroom_core::compaction::kept_index(messages, marker)?;
+            out.push(serde_json::json!({
+                "role": "system",
+                "content": marker.get("content").cloned().unwrap_or(serde_json::Value::Null),
+            }));
+            Some(kept)
+        })
+        .unwrap_or(0);
+    for message in &messages[start..] {
         let role = message.get("role").and_then(|v| v.as_str()).unwrap_or("");
         let content = message
             .get("content")
@@ -3732,6 +3828,20 @@ fn setting_row(label: &str, value: &str, th: &Theme) -> El {
 mod tests {
     use super::*;
     use std::sync::mpsc::channel;
+
+    #[test]
+    fn model_history_starts_at_the_compaction_cut() {
+        let messages = vec![
+            serde_json::json!({"id":"m0","role":"user","content":"old"}),
+            serde_json::json!({"id":"m1","role":"user","content":"kept"}),
+            serde_json::json!({"role":"custom","customType":"compaction","content":"SUMMARY","details":{"firstKeptMessageId":"m1"}}),
+        ];
+        let out = model_history(&messages);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0]["role"], "system");
+        assert_eq!(out[0]["content"], "SUMMARY");
+        assert_eq!(out[1]["content"], "kept");
+    }
 
     #[test]
     fn model_history_projects_pi_native_messages() {

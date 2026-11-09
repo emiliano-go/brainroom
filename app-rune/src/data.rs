@@ -908,9 +908,22 @@ pub fn latest_usage(store: &Store, id: &str) -> (u64, f64) {
 
 pub fn load_chat(store: &Store, id: &str) -> Option<Chat> {
     let record = store.load_chat(id)?;
+    let marker = brainroom_core::compaction::active_marker(&record.messages);
+    let start = marker
+        .and_then(|marker| brainroom_core::compaction::kept_index(&record.messages, marker))
+        .unwrap_or(0);
     let mut rows: Vec<Row> = Vec::new();
+    if let Some(marker) = marker
+        && let Some(content) = marker.get("content").and_then(Value::as_str)
+        && !content.trim().is_empty()
+    {
+        let blocks = parse_markdown(content);
+        if !blocks.is_empty() {
+            rows.push(Row::Assistant(blocks));
+        }
+    }
     let mut plan: Option<Plan> = record.extra.get("tree").and_then(plan_from_tree);
-    for message in &record.messages {
+    for message in record.messages.iter().skip(start) {
         let role = message.get("role").and_then(Value::as_str).unwrap_or("");
         let content = message.get("content").cloned().unwrap_or(Value::Null);
         if role == "user" {
