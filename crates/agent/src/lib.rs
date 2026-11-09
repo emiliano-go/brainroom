@@ -25,10 +25,25 @@ pub struct Usage {
 }
 
 #[derive(Clone, Debug, Default)]
+pub struct ThinkingBlock {
+    pub text: String,
+    pub signature: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct AssistantTurn {
     pub text: String,
+    pub thinking: Vec<ThinkingBlock>,
     pub tool_calls: Vec<ToolCall>,
     pub usage: Option<Usage>,
+    pub api: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub stop_reason: Option<String>,
+    pub raw_stop_reason: Option<String>,
+    pub response_id: Option<String>,
+    pub duration_ms: u64,
+    pub thinking_level: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -65,6 +80,15 @@ pub enum Event {
         outcome: String,
         verdict: String,
         solution: String,
+    },
+    Assistant(Value),
+    ToolResult {
+        call_id: String,
+        name: String,
+        content: String,
+        details: Option<Value>,
+        is_error: bool,
+        duration_ms: u64,
     },
     Usage(Usage),
     Done,
@@ -224,6 +248,89 @@ fn practice_tools() -> Vec<ToolSpec> {
             parameters: json!({ "type": "object", "properties": {} }),
         },
     ]
+}
+
+pub fn assistant_record(turn: &AssistantTurn) -> Value {
+    let mut content = Vec::new();
+    for thinking in &turn.thinking {
+        let mut block = serde_json::Map::new();
+        block.insert("type".to_owned(), json!("thinking"));
+        block.insert("thinking".to_owned(), json!(thinking.text));
+        if let Some(signature) = &thinking.signature {
+            block.insert("thinkingSignature".to_owned(), json!(signature));
+        }
+        content.push(Value::Object(block));
+    }
+    if !turn.text.is_empty() {
+        content.push(json!({ "type": "text", "text": turn.text }));
+    }
+    for call in &turn.tool_calls {
+        content.push(json!({
+            "type": "toolCall",
+            "id": call.id,
+            "name": call.name,
+            "arguments": call.arguments,
+        }));
+    }
+    let mut message = serde_json::Map::new();
+    message.insert("role".to_owned(), json!("assistant"));
+    message.insert("content".to_owned(), json!(content));
+    if let Some(api) = &turn.api {
+        message.insert("api".to_owned(), json!(api));
+    }
+    if let Some(provider) = &turn.provider {
+        message.insert("provider".to_owned(), json!(provider));
+    }
+    if let Some(model) = &turn.model {
+        message.insert("model".to_owned(), json!(model));
+    }
+    if let Some(usage) = turn.usage {
+        message.insert(
+            "usage".to_owned(),
+            json!({
+                "input": usage.prompt_tokens,
+                "output": usage.completion_tokens,
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "reasoning": 0,
+                "totalTokens": usage.total_tokens,
+                "cost": { "total": usage.cost.unwrap_or(0.0) },
+            }),
+        );
+    }
+    if let Some(stop) = &turn.stop_reason {
+        message.insert("stopReason".to_owned(), json!(stop));
+    }
+    if let Some(raw) = &turn.raw_stop_reason {
+        message.insert("rawStopReason".to_owned(), json!(raw));
+    }
+    if let Some(response) = &turn.response_id {
+        message.insert("responseId".to_owned(), json!(response));
+    }
+    message.insert("durationMs".to_owned(), json!(turn.duration_ms));
+    if let Some(level) = &turn.thinking_level {
+        message.insert("thinkingLevel".to_owned(), json!(level));
+    }
+    Value::Object(message)
+}
+
+fn emit_tool_result(
+    emit: &Sender<Event>,
+    call_id: &str,
+    name: &str,
+    content: String,
+    details: Option<Value>,
+    is_error: bool,
+    duration_ms: u64,
+) {
+    let _ = emit.send(Event::ToolResult {
+        call_id: call_id.to_owned(),
+        name: name.to_owned(),
+        content,
+        details,
+        is_error,
+        duration_ms,
+    });
 }
 
 fn system_message(mode: Mode) -> Message {
@@ -403,6 +510,7 @@ pub fn run_with_mode(
             if let Some(usage) = turn.usage {
                 let _ = emit.send(Event::Usage(usage));
             }
+            let _ = emit.send(Event::Assistant(assistant_record(&turn)));
             messages.push(assistant_message(&turn));
             if turn.tool_calls.is_empty() {
                 let _ = emit.send(Event::Done);
@@ -458,6 +566,15 @@ pub fn run_with_mode(
                             solution: problem_solution.take().unwrap_or_default(),
                         });
                         messages.push(tool_result(&call.id, "Recorded."));
+                        emit_tool_result(
+                            &emit,
+                            &call.id,
+                            "conclude",
+                            "Recorded.".to_owned(),
+                            None,
+                            false,
+                            0,
+                        );
                     }
                     "quiz" | "probe" | "ask_user_question" => {
                         let question = quiz_question(call);
@@ -495,12 +612,25 @@ pub fn run_with_mode(
                             .to_owned();
                         let _ = emit.send(Event::Plan { mermaid });
                         messages.push(tool_result(&call.id, "Plan recorded."));
+                        emit_tool_result(
+                            &emit,
+                            &call.id,
+                            "plan_init",
+                            "Plan recorded.".to_owned(),
+                            None,
+                            false,
+                            0,
+                        );
                     }
                     "list_sessions" => {
-                        messages.push(tool_result(&call.id, &list_sessions(&data_dir)));
+                        let content = list_sessions(&data_dir);
+                        messages.push(tool_result(&call.id, &content));
+                        emit_tool_result(&emit, &call.id, &call.name, content, None, false, 0);
                     }
                     "list_propositions" => {
-                        messages.push(tool_result(&call.id, &list_propositions(&data_dir)));
+                        let content = list_propositions(&data_dir);
+                        messages.push(tool_result(&call.id, &content));
+                        emit_tool_result(&emit, &call.id, &call.name, content, None, false, 0);
                     }
                     "send_to_user" => {
                         let text = call
@@ -510,10 +640,21 @@ pub fn run_with_mode(
                             .unwrap_or_default()
                             .to_owned();
                         let _ = emit.send(Event::Text(text));
-                        messages.push(tool_result(&call.id, "Delivered."));
+                        messages.push(tool_result(&call.id, "Message received for display."));
+                        emit_tool_result(
+                            &emit,
+                            &call.id,
+                            &call.name,
+                            "Message received for display.".to_owned(),
+                            None,
+                            false,
+                            0,
+                        );
                     }
                     other => {
-                        messages.push(tool_result(&call.id, &format!("Unknown tool: {other}")))
+                        let content = format!("Unknown tool: {other}");
+                        messages.push(tool_result(&call.id, &content));
+                        emit_tool_result(&emit, &call.id, &call.name, content, None, true, 0);
                     }
                 }
             }
@@ -542,6 +683,7 @@ pub struct OpenRouter {
 
 impl Completer for OpenRouter {
     fn complete(&self, messages: &[Message], tools: &[ToolSpec]) -> anyhow::Result<AssistantTurn> {
+        let started = std::time::Instant::now();
         let key = brainroom_ai::api_key()
             .ok_or_else(|| anyhow!("No OpenRouter API key found for the agent"))?;
         let tools_json: Vec<Value> = tools
@@ -635,10 +777,49 @@ impl Completer for OpenRouter {
                 cost: u.get("cost").and_then(Value::as_f64),
             })
         });
+        let model = value
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| Some(self.model.clone()));
+        let response_id = value.get("id").and_then(Value::as_str).map(str::to_owned);
+        let finish = value
+            .pointer("/choices/0/finish_reason")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let stop_reason = finish.as_deref().map(|reason| match reason {
+            "tool_calls" => "toolUse",
+            "length" => "length",
+            "content_filter" => "error",
+            _ => "stop",
+        });
+        let thinking = message
+            .get("reasoning")
+            .and_then(Value::as_str)
+            .or_else(|| message.get("reasoning_content").and_then(Value::as_str))
+            .filter(|text| !text.trim().is_empty())
+            .map(|text| ThinkingBlock {
+                text: text.to_owned(),
+                signature: message
+                    .get("reasoning_details")
+                    .filter(|details| !details.is_null())
+                    .map(Value::to_string),
+            })
+            .into_iter()
+            .collect();
         Ok(AssistantTurn {
             text: reply,
+            thinking,
             tool_calls,
             usage,
+            api: Some("openai-completions".to_owned()),
+            provider: Some("openrouter".to_owned()),
+            model,
+            stop_reason: stop_reason.map(str::to_owned),
+            raw_stop_reason: finish,
+            response_id,
+            duration_ms: started.elapsed().as_millis() as u64,
+            thinking_level: None,
         })
     }
 }
@@ -683,6 +864,54 @@ mod tests {
             .expect("an agent event")
     }
 
+    fn recv_app(rx: &Receiver<Event>) -> Event {
+        loop {
+            match recv(rx) {
+                Event::Assistant(_) | Event::ToolResult { .. } | Event::Usage(_) => continue,
+                other => return other,
+            }
+        }
+    }
+
+    #[test]
+    fn assistant_record_matches_learnharness_shape() {
+        let turn = AssistantTurn {
+            text: "Here.".to_owned(),
+            thinking: vec![ThinkingBlock {
+                text: "Because.".to_owned(),
+                signature: Some("[]".to_owned()),
+            }],
+            tool_calls: vec![ToolCall {
+                id: "call-1".to_owned(),
+                name: "quiz".to_owned(),
+                arguments: json!({ "question": "Q" }),
+            }],
+            usage: Some(Usage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+                cost: Some(0.25),
+            }),
+            api: Some("openai-completions".to_owned()),
+            provider: Some("openrouter".to_owned()),
+            model: Some("m".to_owned()),
+            stop_reason: Some("toolUse".to_owned()),
+            raw_stop_reason: Some("tool_calls".to_owned()),
+            response_id: Some("gen-1".to_owned()),
+            duration_ms: 42,
+            thinking_level: Some("medium".to_owned()),
+        };
+        let record = assistant_record(&turn);
+        assert_eq!(record["content"][0]["type"], "thinking");
+        assert_eq!(record["content"][1]["type"], "text");
+        assert_eq!(record["content"][2]["type"], "toolCall");
+        assert_eq!(record["usage"]["totalTokens"], 15);
+        assert_eq!(record["usage"]["cost"]["total"], 0.25);
+        assert_eq!(record["stopReason"], "toolUse");
+        assert_eq!(record["rawStopReason"], "tool_calls");
+        assert_eq!(record["durationMs"], 42);
+    }
+
     #[test]
     fn quiz_waits_for_the_answer_then_continues() {
         let quiz = AssistantTurn {
@@ -697,11 +926,13 @@ mod tests {
                 }),
             }],
             usage: None,
+            ..Default::default()
         };
         let done = AssistantTurn {
             text: "Correct.".to_owned(),
             tool_calls: vec![],
             usage: None,
+            ..Default::default()
         };
         let (fake, seen) = Fake::new(vec![quiz, done]);
         let (in_tx, in_rx) = mpsc::channel();
@@ -709,14 +940,14 @@ mod tests {
         std::thread::spawn(move || run(&fake, PathBuf::from("/tmp"), Vec::new(), in_rx, out_tx));
 
         in_tx.send(Input::User("teach me".to_owned())).unwrap();
-        assert!(matches!(recv(&out_rx), Event::Text(t) if t == "Try this."));
+        assert!(matches!(recv_app(&out_rx), Event::Text(t) if t == "Try this."));
         let Event::Quiz {
             call_id,
             question,
             options,
             correct,
             ..
-        } = recv(&out_rx)
+        } = recv_app(&out_rx)
         else {
             panic!("expected a quiz");
         };
@@ -731,8 +962,8 @@ mod tests {
                 content: "4".to_owned(),
             })
             .unwrap();
-        assert!(matches!(recv(&out_rx), Event::Text(t) if t == "Correct."));
-        assert!(matches!(recv(&out_rx), Event::Done));
+        assert!(matches!(recv_app(&out_rx), Event::Text(t) if t == "Correct."));
+        assert!(matches!(recv_app(&out_rx), Event::Done));
 
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 2);
@@ -758,6 +989,7 @@ mod tests {
                 }),
             }],
             usage: None,
+            ..Default::default()
         };
         let conclusion = AssistantTurn {
             text: String::new(),
@@ -767,11 +999,13 @@ mod tests {
                 arguments: json!({ "outcome": "solved", "verdict": "Correct." }),
             }],
             usage: None,
+            ..Default::default()
         };
         let done = AssistantTurn {
             text: "Next problem soon.".to_owned(),
             tool_calls: vec![],
             usage: None,
+            ..Default::default()
         };
         let (fake, _) = Fake::new(vec![problem, conclusion, done]);
         let (in_tx, in_rx) = mpsc::channel();
@@ -795,7 +1029,7 @@ mod tests {
             statement,
             mode,
             solution,
-        } = recv(&out_rx)
+        } = recv_app(&out_rx)
         else {
             panic!("expected a problem");
         };
@@ -814,15 +1048,15 @@ mod tests {
             outcome,
             verdict,
             solution,
-        } = recv(&out_rx)
+        } = recv_app(&out_rx)
         else {
             panic!("expected a conclusion");
         };
         assert_eq!(outcome, "solved");
         assert_eq!(verdict, "Correct.");
         assert_eq!(solution, "2x");
-        assert!(matches!(recv(&out_rx), Event::Text(t) if t == "Next problem soon."));
-        assert!(matches!(recv(&out_rx), Event::Done));
+        assert!(matches!(recv_app(&out_rx), Event::Text(t) if t == "Next problem soon."));
+        assert!(matches!(recv_app(&out_rx), Event::Done));
     }
 
     #[test]
@@ -852,11 +1086,13 @@ mod tests {
                 },
             ],
             usage: None,
+            ..Default::default()
         };
         let done = AssistantTurn {
             text: "Planned.".to_owned(),
             tool_calls: vec![],
             usage: None,
+            ..Default::default()
         };
         let (fake, seen) = Fake::new(vec![calls, done]);
         let (in_tx, in_rx) = mpsc::channel();
@@ -864,9 +1100,11 @@ mod tests {
         std::thread::spawn(move || run(&fake, PathBuf::from("/tmp"), Vec::new(), in_rx, out_tx));
 
         in_tx.send(Input::User("plan".to_owned())).unwrap();
-        assert!(matches!(recv(&out_rx), Event::Plan { mermaid } if mermaid.contains("graph TD")));
-        assert!(matches!(recv(&out_rx), Event::Text(t) if t == "Planned."));
-        assert!(matches!(recv(&out_rx), Event::Done));
+        assert!(
+            matches!(recv_app(&out_rx), Event::Plan { mermaid } if mermaid.contains("graph TD"))
+        );
+        assert!(matches!(recv_app(&out_rx), Event::Text(t) if t == "Planned."));
+        assert!(matches!(recv_app(&out_rx), Event::Done));
 
         let seen = seen.lock().unwrap();
         let second = seen.last().unwrap();

@@ -186,7 +186,7 @@ fn new_chat_id() -> String {
     )
 }
 
-fn new_message_id() -> String {
+pub fn new_message_id() -> String {
     format!(
         "msg_{}_{}",
         base36(now_millis()),

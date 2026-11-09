@@ -246,58 +246,49 @@ impl State {
     }
 
     fn history_messages(&self) -> Vec<serde_json::Value> {
-        let Some(chat) = &self.chat else {
+        let Some(id) = &self.active_id else {
             return Vec::new();
         };
-        let mut messages = Vec::new();
-        for row in &chat.rows {
-            match row {
-                Row::User(text) => messages.push(serde_json::json!({
-                    "role": "user", "content": text
-                })),
-                Row::Assistant(blocks) => messages.push(serde_json::json!({
-                    "role": "assistant", "content": data::blocks_text(blocks)
-                })),
-                Row::Quiz(_) | Row::Problem(_) => {}
-            }
-        }
-        if messages.len() > 16 {
-            messages = messages.split_off(messages.len() - 16);
-        }
-        messages
+        let Some(record) = data::store().load_chat(id) else {
+            return Vec::new();
+        };
+        model_history(&record.messages)
     }
 
-    fn persist_tool_call(&self, call_id: &str, name: &str, arguments: serde_json::Value) {
+    fn persist_assistant(&self, message: serde_json::Value) {
         let Some(id) = self.active_id.clone() else {
             return;
         };
-        let store = data::store();
-        if let Some(mut record) = store.load_chat(&id) {
-            store.append_value(
-                &mut record,
-                serde_json::json!({
-                    "role": "assistant",
-                    "content": [{
-                        "type": "toolCall",
-                        "id": call_id,
-                        "name": name,
-                        "arguments": arguments,
-                    }],
-                    "timestamp": brainroom_core::now_millis(),
-                }),
-            );
-        }
+        append_assistant(&data::store(), &id, message);
+    }
+
+    fn persist_tool_result(
+        &self,
+        call_id: &str,
+        name: &str,
+        content: String,
+        details: Option<serde_json::Value>,
+        is_error: bool,
+        duration_ms: u64,
+    ) {
+        let Some(id) = self.active_id.clone() else {
+            return;
+        };
+        append_tool_result(
+            &data::store(),
+            &id,
+            call_id,
+            name,
+            content,
+            details,
+            is_error,
+            duration_ms,
+        );
     }
 
     fn finish_turn(&mut self) {
-        let text = self.stream_text.trim().to_owned();
-        if !text.is_empty()
-            && let Some(id) = self.active_id.clone()
-        {
+        if let Some(id) = self.active_id.clone() {
             let store = data::store();
-            if let Some(mut record) = store.load_chat(&id) {
-                store.append_message(&mut record, "assistant", &text);
-            }
             self.chat = data::load_chat(&store, &id);
             self.sessions = data::sessions(&store);
         }
@@ -433,6 +424,26 @@ impl State {
                     }
                     self.stream_text.push_str(&text);
                 }
+                brainroom_agent::Event::Assistant(message) => {
+                    self.persist_assistant(message);
+                }
+                brainroom_agent::Event::ToolResult {
+                    call_id,
+                    name,
+                    content,
+                    details,
+                    is_error,
+                    duration_ms,
+                } => {
+                    self.persist_tool_result(
+                        &call_id,
+                        &name,
+                        content,
+                        details,
+                        is_error,
+                        duration_ms,
+                    );
+                }
                 brainroom_agent::Event::Quiz {
                     call_id,
                     tool,
@@ -457,15 +468,6 @@ impl State {
                             call_id: Some(call_id.clone()),
                         }));
                     }
-                    let arg_options: Vec<serde_json::Value> = options
-                        .iter()
-                        .map(|label| serde_json::json!({ "label": label }))
-                        .collect();
-                    self.persist_tool_call(
-                        &call_id,
-                        "quiz",
-                        serde_json::json!({ "question": question, "options": arg_options }),
-                    );
                     self.pending_call = Some(call_id);
                     self.pending_problem = false;
                     self.busy = false;
@@ -484,15 +486,6 @@ impl State {
                             concluded: None,
                         }));
                     }
-                    self.persist_tool_call(
-                        &call_id,
-                        "problem",
-                        serde_json::json!({
-                            "statement": statement,
-                            "mode": mode,
-                            "modelSolution": solution,
-                        }),
-                    );
                     self.pending_call = Some(call_id);
                     self.pending_problem = true;
                     self.busy = false;
@@ -512,19 +505,9 @@ impl State {
                             verdict: verdict.clone(),
                         });
                     }
-                    self.persist_tool_call(
-                        "",
-                        "conclude",
-                        serde_json::json!({ "outcome": outcome, "verdict": verdict }),
-                    );
                     self.pending_problem = false;
                 }
                 brainroom_agent::Event::Plan { mermaid } => {
-                    self.persist_tool_call(
-                        "",
-                        "plan_init",
-                        serde_json::json!({ "mermaid": mermaid }),
-                    );
                     if let Some(chat) = &mut self.chat {
                         chat.plan = Some(data::parse_plan(&mermaid));
                     }
@@ -621,19 +604,7 @@ impl State {
         }
         self.practice_answer = TextEdit::new("");
         self.pending_problem = false;
-        if let Some(id) = self.active_id.clone()
-            && let Some(mut record) = data::store().load_chat(&id)
-        {
-            data::store().append_value(
-                &mut record,
-                serde_json::json!({
-                    "role": "toolResult",
-                    "toolName": "problem",
-                    "content": answer,
-                    "timestamp": brainroom_core::now_millis(),
-                }),
-            );
-        }
+        self.persist_tool_result(&call_id, "problem", answer.clone(), None, false, 0);
         if let Some(agent) = &self.agent {
             let _ = agent.inbox.send(brainroom_agent::Input::ToolResult {
                 call_id,
@@ -712,7 +683,6 @@ impl State {
         };
         let thinking = self.thinking.text.trim().to_owned();
         let reading = self.reading.text.trim().to_owned();
-        let id = chat.id.clone();
         self.thinking = TextEdit::new("");
         self.quiz_selected.clear();
         self.quiz_open = false;
@@ -792,21 +762,14 @@ impl State {
             serde_json::json!(brainroom_core::now_iso()),
         );
         let details = serde_json::Value::Object(details);
-        let store = data::store();
-        if let Some(mut record) = store.load_chat(&id) {
-            store.append_value(
-                &mut record,
-                serde_json::json!({
-                    "role": "toolResult",
-                    "toolName": tool,
-                    "toolCallId": quiz_call,
-                    "content": compact.to_string(),
-                    "details": details,
-                    "isError": false,
-                    "timestamp": brainroom_core::now_millis(),
-                }),
-            );
-        }
+        self.persist_tool_result(
+            quiz_call.as_deref().unwrap_or_default(),
+            &tool,
+            compact.to_string(),
+            Some(details),
+            false,
+            0,
+        );
         if let Some(call_id) = self.pending_call.take() {
             if let Some(agent) = &self.agent {
                 let _ = agent.inbox.send(brainroom_agent::Input::ToolResult {
@@ -833,6 +796,146 @@ impl State {
             self.send_message(&message);
         }
     }
+}
+
+fn append_assistant(store: &brainroom_store::Store, chat_id: &str, mut message: serde_json::Value) {
+    if message.get("id").is_none() {
+        message["id"] = serde_json::json!(brainroom_store::new_message_id());
+    }
+    if message.get("timestamp").is_none() {
+        message["timestamp"] = serde_json::json!(brainroom_core::now_millis());
+    }
+    if let Some(mut record) = store.load_chat(chat_id) {
+        store.append_value(&mut record, message);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_tool_result(
+    store: &brainroom_store::Store,
+    chat_id: &str,
+    call_id: &str,
+    name: &str,
+    content: String,
+    details: Option<serde_json::Value>,
+    is_error: bool,
+    duration_ms: u64,
+) {
+    let mut message = serde_json::json!({
+        "id": brainroom_store::new_message_id(),
+        "role": "toolResult",
+        "toolCallId": call_id,
+        "toolName": name,
+        "content": [{ "type": "text", "text": content }],
+        "isError": is_error,
+        "durationMs": duration_ms,
+        "timestamp": brainroom_core::now_millis(),
+    });
+    if let Some(details) = details {
+        message["details"] = details;
+    }
+    if let Some(mut record) = store.load_chat(chat_id) {
+        store.append_value(&mut record, message);
+    }
+}
+
+fn model_history(messages: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    for message in messages {
+        let role = message.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        let content = message
+            .get("content")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        match role {
+            "user" => {
+                let text = match &content {
+                    serde_json::Value::String(text) => text.clone(),
+                    serde_json::Value::Array(parts) => parts
+                        .iter()
+                        .filter_map(|part| part.get("text").and_then(|v| v.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    _ => String::new(),
+                };
+                if !text.trim().is_empty() {
+                    out.push(serde_json::json!({ "role": "user", "content": text }));
+                }
+            }
+            "assistant" => {
+                let mut text = String::new();
+                let mut calls = Vec::new();
+                if let serde_json::Value::Array(parts) = &content {
+                    for part in parts {
+                        match part.get("type").and_then(|v| v.as_str()) {
+                            Some("text") => {
+                                if let Some(chunk) = part.get("text").and_then(|v| v.as_str()) {
+                                    if !text.is_empty() {
+                                        text.push('\n');
+                                    }
+                                    text.push_str(chunk);
+                                }
+                            }
+                            Some("toolCall") => {
+                                let id = part.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                                let name = part.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                                let arguments = part
+                                    .get("arguments")
+                                    .cloned()
+                                    .unwrap_or_else(|| serde_json::json!({}));
+                                calls.push(serde_json::json!({
+                                    "id": id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": name,
+                                        "arguments": arguments.to_string(),
+                                    }
+                                }));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if text.is_empty() && calls.is_empty() {
+                    continue;
+                }
+                let mut message = serde_json::json!({ "role": "assistant" });
+                message["content"] = if text.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!(text)
+                };
+                if !calls.is_empty() {
+                    message["tool_calls"] = serde_json::json!(calls);
+                }
+                out.push(message);
+            }
+            "toolResult" => {
+                let text = match &content {
+                    serde_json::Value::String(text) => text.clone(),
+                    serde_json::Value::Array(parts) => parts
+                        .iter()
+                        .filter_map(|part| part.get("text").and_then(|v| v.as_str()))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    _ => String::new(),
+                };
+                let call_id = message
+                    .get("toolCallId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                if !call_id.is_empty() && !text.is_empty() {
+                    out.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": text,
+                    }));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 fn dot(_th: &Theme, c: Color) -> El {
@@ -3409,6 +3512,74 @@ fn setting_row(label: &str, value: &str, th: &Theme) -> El {
 mod tests {
     use super::*;
     use std::sync::mpsc::channel;
+
+    #[test]
+    fn model_history_projects_pi_native_messages() {
+        let messages = vec![
+            serde_json::json!({"role":"user","content":"hi"}),
+            serde_json::json!({"role":"assistant","content":[
+                {"type":"thinking","thinking":"plan"},
+                {"type":"text","text":"Hello"},
+                {"type":"toolCall","id":"c1","name":"quiz","arguments":{"question":"Q"}}
+            ]}),
+            serde_json::json!({"role":"toolResult","toolCallId":"c1","toolName":"quiz","content":[{"type":"text","text":"{\"kind\":\"quiz\"}"}]}),
+        ];
+        let out = model_history(&messages);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[1]["content"], "Hello");
+        assert_eq!(out[1]["tool_calls"][0]["id"], "c1");
+        assert_eq!(out[1]["tool_calls"][0]["function"]["name"], "quiz");
+        assert_eq!(out[2]["tool"], serde_json::json!(null));
+        assert_eq!(out[2]["tool_call_id"], "c1");
+    }
+
+    #[test]
+    fn assistant_and_tool_results_persist_with_ids() {
+        let store = brainroom_store::Store::new(std::env::temp_dir().join(format!(
+            "brainroom-msg-{}",
+            brainroom_store::new_message_id()
+        )));
+        let record = store.create_chat("test");
+        let id = record.id.clone();
+        append_assistant(
+            &store,
+            &id,
+            serde_json::json!({
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "why"},
+                    {"type": "text", "text": "Hello"},
+                    {"type": "toolCall", "id": "c1", "name": "quiz", "arguments": {"question": "Q"}}
+                ],
+                "provider": "openrouter",
+                "model": "m",
+                "usage": {"totalTokens": 3, "cost": {"total": 0.01}},
+                "stopReason": "toolUse"
+            }),
+        );
+        append_tool_result(
+            &store,
+            &id,
+            "c1",
+            "quiz",
+            "{\"kind\":\"quiz\"}".to_owned(),
+            Some(serde_json::json!({"kind": "quiz"})),
+            false,
+            7,
+        );
+        let record = store.load_chat(&id).expect("record");
+        assert_eq!(record.messages.len(), 2);
+        assert!(record.messages[0].get("id").is_some());
+        assert_eq!(record.messages[0]["stopReason"], "toolUse");
+        assert!(record.messages[1].get("id").is_some());
+        assert_eq!(record.messages[1]["toolCallId"], "c1");
+        assert_eq!(record.messages[1]["content"][0]["type"], "text");
+        assert_eq!(record.messages[1]["durationMs"], 7);
+        let history = model_history(&record.messages);
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0]["tool_calls"][0]["id"], "c1");
+        assert_eq!(history[1]["role"], "tool");
+    }
 
     #[test]
     fn practice_events_pose_answer_and_reveal() {

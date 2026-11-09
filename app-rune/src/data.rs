@@ -573,6 +573,7 @@ fn apply_result(quiz: &mut Quiz, text: &str, details: Option<&Value>) {
     }
 }
 
+#[allow(dead_code)]
 pub fn blocks_text(blocks: &[Block]) -> String {
     let mut out = String::new();
     for block in blocks {
@@ -757,6 +758,15 @@ pub fn load_chat(store: &Store, id: &str) -> Option<Chat> {
                         && let Some(quiz) = quiz_from_call(&part, name != "ask_user_question", name)
                     {
                         rows.push(Row::Quiz(quiz));
+                    }
+                    if name == "send_to_user"
+                        && let Some(text) = part
+                            .get("arguments")
+                            .and_then(|a| a.get("message"))
+                            .and_then(Value::as_str)
+                            .filter(|text| !text.trim().is_empty())
+                    {
+                        rows.push(Row::Assistant(vec![Block::Para(text.to_owned())]));
                     }
                     if name == "problem" {
                         let args = part.get("arguments").cloned().unwrap_or(Value::Null);
