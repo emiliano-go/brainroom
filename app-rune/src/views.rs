@@ -41,6 +41,8 @@ pub struct State {
     pub cost: String,
     pub tokens: u64,
     pub spend: f64,
+    pub graph_w: f32,
+    pub graph_h: f32,
     pub dark_override: Option<bool>,
     pub chains_open: bool,
     pub plan_open: bool,
@@ -97,6 +99,8 @@ impl State {
             cost: "$0.0000".to_owned(),
             tokens: 0,
             spend: 0.0,
+            graph_w: 1040.0,
+            graph_h: 760.0,
             dark_override: data::appearance_dark(),
             chains_open: false,
             plan_open: false,
@@ -1356,8 +1360,15 @@ fn home(s: &State, th: &Theme) -> El {
                     col()
                         .w_full()
                         .h_full()
-                        .center()
-                        .child(graph_box(s, th, 1040.0, 760.0)),
+                        .on_layout(|s: &mut State, r: [f32; 4]| {
+                            if (s.graph_w - r[2]).abs() > 0.5 {
+                                s.graph_w = r[2];
+                            }
+                            if (s.graph_h - r[3]).abs() > 0.5 {
+                                s.graph_h = r[3];
+                            }
+                        })
+                        .child(graph_box(s, th, s.graph_w, s.graph_h)),
                 ),
         )
         .child(row().w_full().pb(18.0).justify_center().child(composer))
