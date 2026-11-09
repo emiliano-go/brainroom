@@ -39,6 +39,8 @@ pub struct State {
     pub dictate_open: bool,
     pub effort: String,
     pub cost: String,
+    pub tokens: u64,
+    pub spend: f64,
     pub dark_override: Option<bool>,
     pub chains_open: bool,
     pub plan_open: bool,
@@ -93,6 +95,8 @@ impl State {
             dictate_open: false,
             effort: data::effort(),
             cost: "$0.0000".to_owned(),
+            tokens: 0,
+            spend: 0.0,
             dark_override: data::appearance_dark(),
             chains_open: false,
             plan_open: false,
@@ -470,6 +474,13 @@ impl State {
                     );
                     if let Some(chat) = &mut self.chat {
                         chat.plan = Some(data::parse_plan(&mermaid));
+                    }
+                }
+                brainroom_agent::Event::Usage(usage) => {
+                    self.tokens = self.tokens.saturating_add(usage.total_tokens);
+                    if let Some(cost) = usage.cost {
+                        self.spend += cost;
+                        self.cost = format!("${:.4}", self.spend);
                     }
                 }
                 brainroom_agent::Event::Done => {
@@ -1920,14 +1931,19 @@ fn quiz_card(quiz: &data::Quiz, live: bool, s: &State, th: &Theme) -> El {
                 Some(false) => ("Incorrect", th.red),
                 None => ("Answered", th.muted),
             };
-            card = card.child(
-                row()
-                    .w_full()
-                    .gap(8.0)
-                    .items_center()
-                    .child(icon(&theme::CHECK, 14.0).color(color))
-                    .child(text(label.to_owned()).font(mono(11.0, 500.0)).color(color)),
-            );
+            return row()
+                .w_full()
+                .key("answered-quiz")
+                .gap(12.0)
+                .items_center()
+                .px(14.0)
+                .py(10.0)
+                .radius(8.0)
+                .fill(th.card)
+                .border(1.0, th.border_soft)
+                .child(dot(th, color))
+                .child(md::para(&quiz.question, th).grow(1.0))
+                .child(text(label.to_owned()).font(mono(11.0, 500.0)).color(color));
         }
         return row().w_full().child(card);
     }
@@ -2393,6 +2409,16 @@ fn node_rename_modal(s: &State, th: &Theme) -> El {
     el().w_full().h_full().fill(th.bg).center().child(card)
 }
 
+fn format_tokens(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.1}k", tokens as f64 / 1_000.0)
+    } else {
+        tokens.to_string()
+    }
+}
+
 fn stats_bar(s: &State, th: &Theme) -> El {
     row().w_full().h(58.0).justify_center().child(
         col()
@@ -2405,7 +2431,7 @@ fn stats_bar(s: &State, th: &Theme) -> El {
                     .items_center()
                     .gap(10.0)
                     .child(
-                        text(format!("0 / 0 · {}", s.cost))
+                        text(format!("{} / 202.8k · {}", format_tokens(s.tokens), s.cost))
                             .font(mono(11.0, 400.0))
                             .color(th.muted),
                     )
@@ -2638,7 +2664,7 @@ fn settings(s: &State, th: &Theme) -> El {
 
     let card = row()
         .key("settings-dialog")
-        .size(860.0, 560.0)
+        .size(960.0, 620.0)
         .gap(0.0)
         .radius(16.0)
         .fill(th.bg)
@@ -2805,6 +2831,17 @@ mod tests {
         events
             .send(brainroom_agent::Event::Text("Try this.".to_owned()))
             .unwrap();
+        events
+            .send(brainroom_agent::Event::Usage(brainroom_agent::Usage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+                cost: Some(0.25),
+            }))
+            .unwrap();
+        assert!(state.poll());
+        assert_eq!(state.tokens, 15);
+        assert_eq!(state.cost, "$0.2500");
         events
             .send(brainroom_agent::Event::Quiz {
                 call_id: "call-1".to_owned(),

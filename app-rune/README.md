@@ -46,7 +46,6 @@ Upstream math hook request: https://github.com/anomalyco/rune/issues/332
 
 ## Known gaps
 
-- Answered quizzes stay as cards; LearnHarness collapses them into the answered card.
-- Token usage in the status line is still a placeholder (`0 / 0`).
 - Graph still renders in a bounded box rather than full-bleed behind the composer.
-- Settings dialog is smaller than LearnHarness's and uses mono section labels.
+- Settings dialog uses mono section labels and is 960x620 (LearnHarness's exact size unverified).
+- Context denominator is a fixed `202.8k` until the model catalog reports context windows.

@@ -16,10 +16,19 @@ pub struct ToolCall {
     pub arguments: Value,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Usage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    pub cost: Option<f64>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct AssistantTurn {
     pub text: String,
     pub tool_calls: Vec<ToolCall>,
+    pub usage: Option<Usage>,
 }
 
 #[derive(Clone, Debug)]
@@ -52,6 +61,7 @@ pub enum Event {
         verdict: String,
         solution: String,
     },
+    Usage(Usage),
     Done,
     Error(String),
 }
@@ -337,6 +347,9 @@ pub fn run_with_mode(
             if !turn.text.is_empty() {
                 let _ = emit.send(Event::Text(turn.text.clone()));
             }
+            if let Some(usage) = turn.usage {
+                let _ = emit.send(Event::Usage(usage));
+            }
             messages.push(assistant_message(&turn));
             if turn.tool_calls.is_empty() {
                 let _ = emit.send(Event::Done);
@@ -541,9 +554,27 @@ impl Completer for OpenRouter {
                 });
             }
         }
+        let usage = value.get("usage").and_then(|u| {
+            let prompt = u.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
+            let completion = u
+                .get("completion_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let total = u
+                .get("total_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(prompt + completion);
+            (total > 0 || prompt > 0 || completion > 0).then_some(Usage {
+                prompt_tokens: prompt,
+                completion_tokens: completion,
+                total_tokens: total,
+                cost: u.get("cost").and_then(Value::as_f64),
+            })
+        });
         Ok(AssistantTurn {
             text: reply,
             tool_calls,
+            usage,
         })
     }
 }
@@ -600,10 +631,12 @@ mod tests {
                     "options": [{ "label": "3" }, { "label": "4" }]
                 }),
             }],
+            usage: None,
         };
         let done = AssistantTurn {
             text: "Correct.".to_owned(),
             tool_calls: vec![],
+            usage: None,
         };
         let (fake, seen) = Fake::new(vec![quiz, done]);
         let (in_tx, in_rx) = mpsc::channel();
@@ -657,6 +690,7 @@ mod tests {
                     "modelSolution": "2x"
                 }),
             }],
+            usage: None,
         };
         let conclusion = AssistantTurn {
             text: String::new(),
@@ -665,10 +699,12 @@ mod tests {
                 name: "conclude".to_owned(),
                 arguments: json!({ "outcome": "solved", "verdict": "Correct." }),
             }],
+            usage: None,
         };
         let done = AssistantTurn {
             text: "Next problem soon.".to_owned(),
             tool_calls: vec![],
+            usage: None,
         };
         let (fake, _) = Fake::new(vec![problem, conclusion, done]);
         let (in_tx, in_rx) = mpsc::channel();
@@ -748,10 +784,12 @@ mod tests {
                     arguments: json!({}),
                 },
             ],
+            usage: None,
         };
         let done = AssistantTurn {
             text: "Planned.".to_owned(),
             tool_calls: vec![],
+            usage: None,
         };
         let (fake, seen) = Fake::new(vec![calls, done]);
         let (in_tx, in_rx) = mpsc::channel();
