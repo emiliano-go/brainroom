@@ -529,6 +529,9 @@ impl State {
                     self.pending_problem = false;
                 }
                 brainroom_agent::Event::Plan { mermaid } => {
+                    if let Some(id) = self.active_id.clone() {
+                        data::save_plan(&id, &mermaid);
+                    }
                     if let Some(chat) = &mut self.chat {
                         chat.plan = Some(data::parse_plan(&mermaid));
                     }
@@ -2359,6 +2362,24 @@ fn plan_window(s: &State, th: &Theme) -> El {
                 ),
         );
     };
+    let mut runs: Vec<usize> = Vec::new();
+    if let Some(chat) = &s.chat {
+        for row in &chat.rows {
+            if let Row::Quiz(quiz) = row
+                && let Some(node) = &quiz.node_id
+                && let Some(index) = plan.ids.iter().position(|id| id == node)
+                && runs.last() != Some(&index)
+            {
+                runs.push(index);
+            }
+        }
+    }
+    let current = runs.last().copied();
+    let visited: std::collections::HashSet<usize> = runs
+        .iter()
+        .take(runs.len().saturating_sub(1))
+        .copied()
+        .collect();
     let mut per_layer: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
     let mut pos: Vec<[f32; 2]> = Vec::with_capacity(plan.labels.len());
     let mut width = 0.0f32;
@@ -2397,18 +2418,30 @@ fn plan_window(s: &State, th: &Theme) -> El {
                 .a11y_hidden(),
         );
     for (i, label) in plan.labels.iter().enumerate() {
+        let status = if current == Some(i) {
+            "current"
+        } else if visited.contains(&i) {
+            "visited"
+        } else {
+            "upcoming"
+        };
+        let (border, color, fill) = match status {
+            "current" => (th.gold, th.fg, th.raised),
+            "visited" => (th.border_soft, th.muted, th.card),
+            _ => (th.border_soft, th.faint, th.card),
+        };
         canvas = canvas.child(
             el().key(format!("plan-node-{i}"))
                 .size(140.0, 56.0)
                 .absolute(pos[i][0], pos[i][1])
                 .padding(8.0)
                 .radius(8.0)
-                .fill(th.card)
-                .border(1.0, th.border_soft)
+                .fill(fill)
+                .border(1.0, border)
                 .child(
                     text(label.clone())
                         .font(mono(10.0, 400.0))
-                        .color(th.fg)
+                        .color(color)
                         .w_full()
                         .wrap_anywhere(),
                 ),

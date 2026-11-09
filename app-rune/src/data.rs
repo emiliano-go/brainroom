@@ -68,6 +68,7 @@ pub enum Row {
 
 #[derive(Clone, Debug, Default)]
 pub struct Plan {
+    pub ids: Vec<String>,
     pub labels: Vec<String>,
     pub edges: Vec<(usize, usize)>,
     pub depth: Vec<usize>,
@@ -653,7 +654,11 @@ fn plan_node(src: &str) -> (String, String) {
     let src = src.trim();
     if let Some(open) = src.find('[') {
         let id = src[..open].trim().to_owned();
-        let label = src[open + 1..].trim_end_matches(']').trim().to_owned();
+        let label = src[open + 1..]
+            .trim_end_matches(']')
+            .trim()
+            .trim_matches('"')
+            .to_owned();
         (id, label)
     } else {
         (src.to_owned(), src.to_owned())
@@ -664,33 +669,43 @@ pub fn parse_plan(src: &str) -> Plan {
     let mut order: Vec<String> = Vec::new();
     let mut labels: HashMap<String, String> = HashMap::new();
     let mut pairs: Vec<(String, String)> = Vec::new();
-    for line in src.lines().skip(1) {
+    for line in src.lines() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with("%%") {
+        if line.is_empty()
+            || line.starts_with("%%")
+            || line.starts_with("graph")
+            || line.starts_with("flowchart")
+            || line.starts_with("classDef")
+            || line.starts_with("style")
+            || line.starts_with("linkStyle")
+        {
             continue;
         }
         let parts: Vec<&str> = line.split("-->").map(str::trim).collect();
-        if parts.len() != 2 {
+        if parts.len() < 2 {
             continue;
         }
-        let (a, la) = plan_node(parts[0]);
-        let (b, lb) = plan_node(parts[1]);
-        for id in [&a, &b] {
-            if !labels.contains_key(id) {
+        for part in &parts {
+            let (id, label) = plan_node(part);
+            if id.is_empty() {
+                continue;
+            }
+            if !labels.contains_key(&id) {
                 order.push(id.clone());
             }
+            if label != id {
+                labels.insert(id.clone(), label);
+            } else {
+                labels.entry(id.clone()).or_insert(label);
+            }
         }
-        if la != a {
-            labels.insert(a.clone(), la);
-        } else {
-            labels.entry(a.clone()).or_insert(la);
+        for window in parts.windows(2) {
+            let (a, _) = plan_node(window[0]);
+            let (b, _) = plan_node(window[1]);
+            if !a.is_empty() && !b.is_empty() {
+                pairs.push((a, b));
+            }
         }
-        if lb != b {
-            labels.insert(b.clone(), lb);
-        } else {
-            labels.entry(b.clone()).or_insert(lb);
-        }
-        pairs.push((a, b));
     }
     let index: HashMap<String, usize> = order
         .iter()
@@ -721,6 +736,7 @@ pub fn parse_plan(src: &str) -> Plan {
         }
     }
     Plan {
+        ids: order.clone(),
         labels: order
             .into_iter()
             .map(|id| labels.remove(&id).unwrap_or_default())
@@ -728,6 +744,89 @@ pub fn parse_plan(src: &str) -> Plan {
         edges,
         depth,
     }
+}
+
+fn plan_from_tree(tree: &Value) -> Option<Plan> {
+    let nodes = tree.get("nodes")?.as_array()?;
+    let mut ids = Vec::new();
+    let mut labels = Vec::new();
+    for node in nodes {
+        let id = node.get("id").and_then(Value::as_str)?.to_owned();
+        ids.push(id);
+        labels.push(
+            node.get("title")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        );
+    }
+    let index: HashMap<&str, usize> = ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id.as_str(), i))
+        .collect();
+    let mut edges = Vec::new();
+    let mut incoming = vec![0usize; ids.len()];
+    if let Some(list) = tree.get("edges").and_then(Value::as_array) {
+        for edge in list {
+            let from = edge.get("from").and_then(Value::as_str).unwrap_or("");
+            let to = edge.get("to").and_then(Value::as_str).unwrap_or("");
+            if let (Some(&a), Some(&b)) = (index.get(from), index.get(to)) {
+                edges.push((a, b));
+                incoming[b] += 1;
+            }
+        }
+    }
+    let mut depth = vec![0usize; ids.len()];
+    let mut queue: Vec<usize> = (0..ids.len()).filter(|i| incoming[*i] == 0).collect();
+    let mut seen = vec![false; ids.len()];
+    while let Some(i) = queue.pop() {
+        if seen[i] {
+            continue;
+        }
+        seen[i] = true;
+        for (a, b) in &edges {
+            if *a == i {
+                depth[*b] = depth[*b].max(depth[i] + 1);
+                queue.push(*b);
+            }
+        }
+    }
+    Some(Plan {
+        ids,
+        labels,
+        edges,
+        depth,
+    })
+}
+
+pub fn save_plan(chat_id: &str, mermaid: &str) -> bool {
+    let Some(mut record) = store().load_chat(chat_id) else {
+        return false;
+    };
+    let plan = parse_plan(mermaid);
+    let version = record
+        .extra
+        .get("tree")
+        .and_then(|tree| tree.get("version"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        + 1;
+    let tree = serde_json::json!({
+        "nodes": plan.ids.iter().enumerate().map(|(i, id)| {
+            serde_json::json!({ "id": id, "title": plan.labels.get(i).cloned().unwrap_or_default() })
+        }).collect::<Vec<_>>(),
+        "edges": plan.edges.iter().map(|(a, b)| {
+            serde_json::json!({
+                "from": plan.ids.get(*a).cloned().unwrap_or_default(),
+                "to": plan.ids.get(*b).cloned().unwrap_or_default(),
+            })
+        }).collect::<Vec<_>>(),
+        "version": version,
+    });
+    record.extra.insert("tree".to_owned(), tree);
+    store().save_chat(&record);
+    true
 }
 
 /// Mirror LearnHarness's phase seam: probe until a clean probe_done result;
@@ -809,7 +908,7 @@ pub fn latest_usage(store: &Store, id: &str) -> (u64, f64) {
 pub fn load_chat(store: &Store, id: &str) -> Option<Chat> {
     let record = store.load_chat(id)?;
     let mut rows: Vec<Row> = Vec::new();
-    let mut plan: Option<Plan> = None;
+    let mut plan: Option<Plan> = record.extra.get("tree").and_then(plan_from_tree);
     for message in &record.messages {
         let role = message.get("role").and_then(Value::as_str).unwrap_or("");
         let content = message.get("content").cloned().unwrap_or(Value::Null);
@@ -946,9 +1045,6 @@ pub fn load_chat(store: &Store, id: &str) -> Option<Chat> {
         }) {
             apply_result(quiz, &text, details);
         }
-    }
-    if rows.len() > 10 {
-        rows = rows.split_off(rows.len() - 10);
     }
     Some(Chat {
         id: record.id,
@@ -1186,6 +1282,14 @@ mod tests {
         assert_eq!(answered.chosen, [1]);
         assert!(answered.correct.is_none());
         assert!(!answered.dont_know);
+    }
+
+    #[test]
+    fn plan_parses_chains_into_tree_ids() {
+        let plan = parse_plan("graph TD\n  a[A] --> b[B] --> c[C]");
+        assert_eq!(plan.ids, ["a", "b", "c"]);
+        assert_eq!(plan.labels, ["A", "B", "C"]);
+        assert_eq!(plan.edges, [(0, 1), (1, 2)]);
     }
 
     #[test]

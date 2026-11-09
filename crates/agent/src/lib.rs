@@ -577,33 +577,115 @@ fn list_propositions(data_dir: &Path) -> String {
     serde_json::to_string(&nodes).unwrap_or_else(|_| "[]".to_owned())
 }
 
-fn mermaid_node_ids(mermaid: &str) -> Vec<String> {
-    let mut ids = Vec::new();
-    for line in mermaid.lines() {
+struct MermaidPlan {
+    nodes: Vec<(String, String)>,
+    problems: Vec<String>,
+}
+
+fn endpoint(src: &str) -> (String, String) {
+    let src = src.trim();
+    if let Some(open) = src.find('[') {
+        let id = src[..open].trim().to_owned();
+        let title = src[open + 1..]
+            .trim_end_matches(']')
+            .trim()
+            .trim_matches('"')
+            .to_owned();
+        (id, title)
+    } else {
+        (src.to_owned(), src.to_owned())
+    }
+}
+
+fn parse_mermaid_plan(src: &str) -> MermaidPlan {
+    let mut nodes: Vec<(String, String)> = Vec::new();
+    let mut edges: Vec<(String, String)> = Vec::new();
+    let mut problems = Vec::new();
+    for line in src.lines() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with("graph") || line.starts_with("flowchart") {
+        if line.is_empty()
+            || line.starts_with("%%")
+            || line.starts_with("graph")
+            || line.starts_with("flowchart")
+            || line.starts_with("classDef")
+            || line.starts_with("style")
+            || line.starts_with("linkStyle")
+        {
             continue;
         }
-        for segment in line.split("-->") {
-            let segment = segment.trim();
-            if segment.is_empty() {
+        let parts: Vec<&str> = line.split("-->").map(str::trim).collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        for part in &parts {
+            let (id, title) = endpoint(part);
+            if id.is_empty() {
                 continue;
             }
-            let id = match segment.find('[') {
-                Some(pos) => segment[..pos].trim(),
-                None => segment.split_whitespace().next().unwrap_or(""),
-            };
-            if !id.is_empty()
-                && id
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_'))
-                && !ids.iter().any(|existing| existing == id)
+            if !id
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_'))
             {
-                ids.push(id.to_owned());
+                problems.push(format!("node id \"{id}\" must be a lowercase slug"));
+            }
+            match nodes.iter_mut().find(|(existing, _)| existing == &id) {
+                Some((_, existing_title)) => {
+                    if existing_title != &title && title != id {
+                        problems.push(format!("node id \"{id}\" is declared twice"));
+                    }
+                }
+                None => nodes.push((id, title)),
+            }
+        }
+        for window in parts.windows(2) {
+            let (from, _) = endpoint(window[0]);
+            let (to, _) = endpoint(window[1]);
+            if from == to {
+                problems.push(format!("self-loop on node \"{from}\""));
+            }
+            if !from.is_empty() && !to.is_empty() {
+                edges.push((from, to));
             }
         }
     }
-    ids
+    if nodes.is_empty() {
+        problems.push("plan has no nodes".to_owned());
+    }
+    let mut color: std::collections::HashMap<&str, u8> = std::collections::HashMap::new();
+    fn visit<'a>(
+        node: &'a str,
+        edges: &'a [(String, String)],
+        color: &mut std::collections::HashMap<&'a str, u8>,
+        problems: &mut Vec<String>,
+    ) {
+        match color.get(node).copied().unwrap_or(0) {
+            1 => {
+                problems.push(format!("plan contains a cycle through \"{node}\""));
+                return;
+            }
+            2 => return,
+            _ => {}
+        }
+        color.insert(node, 1);
+        for (from, to) in edges {
+            if from == node {
+                visit(to, edges, color, problems);
+            }
+        }
+        color.insert(node, 2);
+    }
+    for (id, _) in &nodes {
+        visit(id, &edges, &mut color, &mut problems);
+    }
+    MermaidPlan { nodes, problems }
+}
+
+fn mermaid_node_ids(mermaid: &str) -> Vec<String> {
+    parse_mermaid_plan(mermaid)
+        .nodes
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
 }
 
 fn existing_plan_nodes(messages: &[Message]) -> std::collections::HashSet<String> {
@@ -841,18 +923,23 @@ pub fn run_with_mode(
                             .and_then(Value::as_str)
                             .unwrap_or_default()
                             .to_owned();
-                        plan_nodes.extend(mermaid_node_ids(&mermaid));
+                        let plan = parse_mermaid_plan(&mermaid);
+                        if !plan.problems.is_empty() {
+                            let content = plan.problems.join("\n");
+                            messages.push(tool_result(&call.id, &content));
+                            emit_tool_result(&emit, &call.id, &call.name, content, None, true, 0);
+                            continue;
+                        }
+                        plan_nodes.extend(plan.nodes.iter().map(|(id, _)| id.clone()));
+                        let content = json!({
+                            "ok": true,
+                            "nodeIds": plan.nodes.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(),
+                            "reminder": "These are the plan's node ids — the only valid nodeId values for every quiz and explain call from here on. Reference them exactly."
+                        })
+                        .to_string();
                         let _ = emit.send(Event::Plan { mermaid });
-                        messages.push(tool_result(&call.id, "Plan recorded."));
-                        emit_tool_result(
-                            &emit,
-                            &call.id,
-                            "plan_init",
-                            "Plan recorded.".to_owned(),
-                            None,
-                            false,
-                            0,
-                        );
+                        messages.push(tool_result(&call.id, &content));
+                        emit_tool_result(&emit, &call.id, &call.name, content, None, false, 0);
                     }
                     "probe_done" => {
                         let strands = call
@@ -1324,6 +1411,17 @@ mod tests {
     fn mermaid_nodes_parse_chains() {
         let ids = mermaid_node_ids("graph TD\n  a[Alpha] --> b[Beta]\n  c --> d[Delta]");
         assert_eq!(ids, ["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn plan_validation_finds_cycles_and_bad_slugs() {
+        let cycle = parse_mermaid_plan("graph TD\n  a[A] --> b[B]\n  b --> a");
+        assert!(cycle.problems.iter().any(|p| p.contains("cycle")));
+        let bad = parse_mermaid_plan("graph TD\n  A[A] --> b[B]");
+        assert!(bad.problems.iter().any(|p| p.contains("lowercase slug")));
+        let good = parse_mermaid_plan("graph TD\n  a[A] --> b[B] --> c[C]");
+        assert!(good.problems.is_empty());
+        assert_eq!(good.nodes.len(), 3);
     }
 
     #[test]
