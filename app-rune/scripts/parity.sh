@@ -32,13 +32,16 @@ assert_tree "$OUT/tree-home.json" sidebar home-settings chains import-notes topi
 "$BIN" --script "$ROOT/app-rune/scripts/graph-settings.json" \
     --tree "$OUT/tree-graph-settings.json" --at 1.0 --size 1920x1080 --scale 1
 assert_tree "$OUT/tree-graph-settings.json" graph-settings gs-node-size gs-edge-alpha
-"$BIN" --scene session --script "$ROOT/app-rune/scripts/quiz-open.json" \
+"$BIN" --scene session \
     --tree "$OUT/tree-session.json" --at 1.0 --size 1920x1080 --scale 1
-assert_tree "$OUT/tree-session.json" transcript reading-thinking
+assert_tree "$OUT/tree-session.json" transcript
+"$BIN" --scene quiz --script "$ROOT/app-rune/scripts/quiz-open.json" \
+    --tree "$OUT/tree-quiz.json" --at 1.0 --size 1920x1080 --scale 1
+assert_tree "$OUT/tree-quiz.json" reading-thinking
 
 "$BIN" --snap "$OUT/home.png" --size 1920x1080 --scale 1
 "$BIN" --snap "$OUT/session.png" --scene session --size 1920x1080 --scale 1
-"$BIN" --script "$ROOT/app-rune/scripts/quiz-open.json" --scene session \
+"$BIN" --script "$ROOT/app-rune/scripts/quiz-open.json" --scene quiz \
     --snap "$OUT/session-quiz-open.png" --at 1.0 --size 1366x768 --scale 1
 "$BIN" --snap "$OUT/settings.png" --scene settings --size 1366x768 --scale 1
 "$BIN" --script "$ROOT/app-rune/scripts/graph-settings.json" \
