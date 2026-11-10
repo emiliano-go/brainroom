@@ -59,3 +59,6 @@ Upstream math hook request: https://github.com/anomalyco/rune/issues/332
 
 - Context denominator comes from the local model catalog (`context_window`), falling back to 202.8k for unknown models.
 - Graph renderer settings are per-session state, not persisted to `settings.json`.
+- Only the OpenRouter transport is ported; the upstream subscription/CLI bridges (Claude, ChatGPT, Gemini, local CLIs) are not.
+- Background job tools (`research`, `demo`, `visual`, `pdf`) run synchronously and write `data/jobs/{id}.json`; there is no detached worker process.
+- `web_fetch` extracts text with a plain HTML strip, not Readability/Turndown, and `web_fetch_pdf` shells out to `pdftotext`.
