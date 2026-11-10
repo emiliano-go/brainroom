@@ -42,6 +42,78 @@ pub struct ChatRecord {
     pub extra: Map<String, Value>,
 }
 
+pub fn normalize_kind(kind: Option<&str>) -> &'static str {
+    match kind {
+        Some("practice") => "practice",
+        _ => "teach",
+    }
+}
+
+fn summary_state(messages: &[Value]) -> (String, bool, bool) {
+    let mut phase = "probe";
+    let mut tagged_check = false;
+    let mut probe_done = false;
+    let mut pending_question = false;
+    let mut pending_problem = false;
+    let mut answered = std::collections::HashSet::new();
+    for message in messages {
+        if message.get("role").and_then(Value::as_str) == Some("toolResult") {
+            if message.get("isError").and_then(Value::as_bool) != Some(true)
+                && message.get("toolName").and_then(Value::as_str) == Some("probe_done")
+            {
+                probe_done = true;
+            }
+            if let Some(id) = message.get("toolCallId").and_then(Value::as_str) {
+                answered.insert(id.to_owned());
+            }
+            continue;
+        }
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(parts) = message.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+        for part in parts {
+            if part.get("type").and_then(Value::as_str) != Some("toolCall") {
+                continue;
+            }
+            let name = part.get("name").and_then(Value::as_str).unwrap_or("");
+            let id = part.get("id").and_then(Value::as_str).unwrap_or("");
+            match name {
+                "quiz" | "explain" => {
+                    let node = part
+                        .get("arguments")
+                        .and_then(|a| a.get("nodeId"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    if !node.is_empty() {
+                        tagged_check = true;
+                    }
+                    if !id.is_empty() && !answered.contains(id) {
+                        pending_question = true;
+                    }
+                }
+                "probe" | "recall" | "ask_user_question" => {
+                    if !id.is_empty() && !answered.contains(id) {
+                        pending_question = true;
+                    }
+                }
+                "problem" => pending_problem = true,
+                "conclude" => pending_problem = false,
+                _ => {}
+            }
+        }
+    }
+    if probe_done {
+        phase = "plan";
+    }
+    if tagged_check {
+        phase = "teach";
+    }
+    (phase.to_owned(), pending_question, pending_problem)
+}
+
 impl ChatRecord {
     pub fn new(id: String, title: String) -> Self {
         let now = now_iso();
@@ -59,11 +131,18 @@ impl ChatRecord {
     }
 
     pub fn summary(&self) -> ChatSummary {
+        let (phase, pending_question, pending_problem) = summary_state(&self.messages);
         ChatSummary {
             id: self.id.clone(),
             title: self.title.clone(),
+            created_at: self.created_at.clone(),
             updated_at: self.updated_at.clone(),
+            kind: normalize_kind(self.kind.as_deref()).to_owned(),
             message_count: self.messages.len(),
+            phase,
+            pending_question,
+            pending_problem,
+            settings: self.settings.clone(),
         }
     }
 }
@@ -73,8 +152,15 @@ impl ChatRecord {
 pub struct ChatSummary {
     pub id: String,
     pub title: String,
+    pub created_at: String,
     pub updated_at: String,
+    pub kind: String,
     pub message_count: usize,
+    pub phase: String,
+    pub pending_question: bool,
+    pub pending_problem: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settings: Option<ChatSettings>,
 }
 
 #[derive(Deserialize, Clone, Debug, Default)]
@@ -164,6 +250,23 @@ pub fn now_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summary_derives_kind_phase_and_pending_state() {
+        let mut record = ChatRecord::new("chat_t".to_owned(), "T".to_owned());
+        record.messages = vec![
+            serde_json::json!({"role":"assistant","content":[{"type":"toolCall","id":"p1","name":"probe_done","arguments":{}}]}),
+            serde_json::json!({"role":"toolResult","toolName":"probe_done","toolCallId":"p1","content":"ok"}),
+            serde_json::json!({"role":"assistant","content":[{"type":"toolCall","id":"q1","name":"quiz","arguments":{"nodeId":"n1"}}]}),
+        ];
+        let summary = record.summary();
+        assert_eq!(summary.kind, "teach");
+        assert_eq!(summary.phase, "teach");
+        assert!(summary.pending_question);
+        assert!(!summary.pending_problem);
+        record.kind = Some("practice".to_owned());
+        assert_eq!(record.summary().kind, "practice");
+    }
 
     #[test]
     fn iso_timestamps_use_javascript_millisecond_shape() {

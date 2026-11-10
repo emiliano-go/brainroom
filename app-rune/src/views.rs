@@ -2401,7 +2401,7 @@ fn session(s: &State, th: &Theme) -> El {
         .child(
             nav_pill("plan", &theme::PLAN, "PLAN", th).on_press(|s: &mut State| s.plan_open = true),
         )
-        .child(nav_pill("teaching", &theme::CIRCLE, kind, th))
+        .child(nav_pill("teach", &theme::CIRCLE, kind, th))
         .window_drag();
 
     let mut transcript = col().w_full().gap(22.0).pt(18.0).pb(10.0);
@@ -3993,7 +3993,7 @@ mod tests {
         state.chat = Some(Chat {
             id: "missing_test_chat".to_owned(),
             title: "test".to_owned(),
-            kind: "teaching".to_owned(),
+            kind: "teach".to_owned(),
             rows: vec![Row::User("start".to_owned())],
             plan: None,
         });
@@ -4047,7 +4047,7 @@ mod tests {
         state.chat = Some(Chat {
             id: "missing_test_chat".to_owned(),
             title: "test".to_owned(),
-            kind: "teaching".to_owned(),
+            kind: "teach".to_owned(),
             rows: vec![Row::User("start".to_owned())],
             plan: None,
         });
@@ -4100,7 +4100,7 @@ mod tests {
         state.chat = Some(Chat {
             id: "missing_test_chat".to_owned(),
             title: "test".to_owned(),
-            kind: "teaching".to_owned(),
+            kind: "teach".to_owned(),
             rows: vec![Row::User("start".to_owned())],
             plan: None,
         });
@@ -4152,7 +4152,7 @@ mod tests {
         state.chat = Some(Chat {
             id: "missing_test_chat".to_owned(),
             title: "test".to_owned(),
-            kind: "teaching".to_owned(),
+            kind: "teach".to_owned(),
             rows: vec![Row::User("start".to_owned())],
             plan: None,
         });

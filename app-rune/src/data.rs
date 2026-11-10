@@ -268,7 +268,7 @@ pub fn sessions(store: &Store) -> Vec<SessionRow> {
                 .ok()
                 .and_then(|t| serde_json::from_str::<Value>(&t).ok())
                 .and_then(|v| v.get("kind").and_then(Value::as_str).map(str::to_owned))
-                .unwrap_or_else(|| "teaching".to_owned());
+                .unwrap_or_else(|| "teach".to_owned());
             SessionRow {
                 status: format!("Waiting for input · {}", session_date(&c.updated_at)),
                 id: c.id,
@@ -1081,7 +1081,7 @@ pub fn load_chat(store: &Store, id: &str) -> Option<Chat> {
     Some(Chat {
         id: record.id,
         title: record.title,
-        kind: record.kind.unwrap_or_else(|| "teaching".to_owned()),
+        kind: record.kind.unwrap_or_else(|| "teach".to_owned()),
         rows,
         plan,
     })

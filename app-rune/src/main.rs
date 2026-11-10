@@ -37,7 +37,7 @@ fn scene_math(s: &mut views::State) {
     s.chat = Some(data::Chat {
         id: "demo".to_owned(),
         title: "Math".to_owned(),
-        kind: "teaching".to_owned(),
+        kind: "teach".to_owned(),
         rows: vec![data::Row::Assistant(vec![
             data::Block::Para(
                 "For $f(n) = 100n + 5$, as $n \\to \\infty$ the term $100n$ dominates.".to_owned(),
